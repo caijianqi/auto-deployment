@@ -1,0 +1,44 @@
+# IDE & System
+.idea/
+.vscode/
+*.iml
+*.iws
+*.ipr
+.DS_Store
+Thumbs.db
+
+# Backend (Java/Maven)
+backend/target/
+backend/bin/
+backend/*.log
+backend/.factorypath
+backend/.settings/
+backend/.project
+backend/.classpath
+
+# Database (SQLite)
+# 不要提交运行时的数据库文件
+*.db
+*.db-shm
+*.db-wal
+data/
+backend/data/
+
+# Frontend (Node/Vue)
+frontend/node_modules/
+frontend/dist/
+frontend/.env.local
+frontend/.env.*.local
+frontend/npm-debug.log*
+frontend/yarn-debug.log*
+frontend/yarn-error.log*
+frontend/.eslintcache
+
+# Project Backups
+backup/
+backend/backup/
+frontend/backup/
+
+# Logs
+logs/
+*.log
