@@ -18,11 +18,15 @@ public class WebSocketConfig implements WebSocketConfigurer {
 
     private final @NonNull LogWebSocketHandler logWebSocketHandler;
     private final @NonNull NginxLogWebSocketHandler nginxLogWebSocketHandler;
+    private final @NonNull TerminalWebSocketHandler terminalWebSocketHandler;
 
     @Autowired
-    public WebSocketConfig(@NonNull LogWebSocketHandler logWebSocketHandler, @NonNull NginxLogWebSocketHandler nginxLogWebSocketHandler) {
+    public WebSocketConfig(@NonNull LogWebSocketHandler logWebSocketHandler, 
+                           @NonNull NginxLogWebSocketHandler nginxLogWebSocketHandler,
+                           @NonNull TerminalWebSocketHandler terminalWebSocketHandler) {
         this.logWebSocketHandler = logWebSocketHandler;
         this.nginxLogWebSocketHandler = nginxLogWebSocketHandler;
+        this.terminalWebSocketHandler = terminalWebSocketHandler;
     }
 
     @Override
@@ -36,6 +40,10 @@ public class WebSocketConfig implements WebSocketConfigurer {
         // 2. Nginx 日志 (包含绝对路径和通配符兼容)
         registry.addHandler(nginxLogWebSocketHandler, "/api/ws/nginx-log/access", "/api/ws/nginx-log/error", "/api/ws/nginx-log/**")
                 .addInterceptors(new NginxLogHandshakeInterceptor())
+                .setAllowedOriginPatterns("*");
+
+        // 3. Web 交互式终端 (Windows / Linux)
+        registry.addHandler(terminalWebSocketHandler, "/api/ws/terminal", "/api/ws/terminal/**")
                 .setAllowedOriginPatterns("*");
     }
 

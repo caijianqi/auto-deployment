@@ -100,6 +100,23 @@ export default {
   file: {
     roots: () => api.get('file/roots'),
     list: (path) => api.get('file/list', { params: { path } }),
-    getContent: (path) => api.get('file/content', { params: { path } })
+    getContent: (path) => api.get('file/content', { params: { path } }),
+    saveContent: (data) => api.post('file/save-content', data),
+    createFolder: (data) => api.post('file/create-folder', data),
+    createFile: (data) => api.post('file/create-file', data),
+    upload: (formData, params) => api.post('file/upload', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      params
+    }),
+    rename: (data) => api.post('file/rename', data),
+    delete: (data) => api.post('file/delete', data),
+    batchDelete: (data) => api.post('file/batch-delete', data),
+    unzip: (data) => api.post('file/unzip', data),
+    zip: (data) => api.post('file/zip', data)
+  },
+  terminal: {
+    info: () => api.get('terminal/info'),
+    exec: (data) => api.post('terminal/exec', data),
+    complete: (data) => api.post('terminal/complete', data)
   }
 }

@@ -8,6 +8,7 @@ import SystemConfig from '@/views/SystemConfig.vue'
 import NginxManager from '@/views/NginxManager.vue'
 import ProcessManage from '@/views/ProcessManage.vue'
 import FileManager from '@/views/FileManager.vue'
+import Terminal from '@/views/Terminal.vue'
 import Init from '@/views/Init.vue'
 
 const routes = [
@@ -63,6 +64,12 @@ const routes = [
         name: 'FileManager',
         component: FileManager,
         meta: { title: '文件管理' }
+      },
+      {
+        path: 'terminal',
+        name: 'Terminal',
+        component: Terminal,
+        meta: { title: '终端控制台' }
       }
     ]
   }

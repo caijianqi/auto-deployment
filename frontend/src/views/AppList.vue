@@ -110,6 +110,7 @@
               </el-button>
               <el-button size="small" @click="viewLogs(row)">日志</el-button>
               <el-button size="small" @click="viewBackups(row)">备份</el-button>
+              <el-button size="small" @click="openTerminalForApp(row)">终端</el-button>
               <el-button
                 size="small"
                 type="info"
@@ -182,6 +183,7 @@
 
 <script setup>
 import { ref, reactive, computed, onMounted, onUnmounted, nextTick } from "vue";
+import { useRouter } from "vue-router";
 import { Plus, Search } from "@element-plus/icons-vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import api from "@/api";
@@ -198,6 +200,24 @@ import AppLogDrawer from "../components/app/AppLogDrawer.vue";
 
 dayjs.extend(relativeTime);
 dayjs.locale("zh-cn");
+
+const router = useRouter();
+
+const openTerminalForApp = (app) => {
+  if (!app) return;
+  // If app has path, use parent directory or path directly
+  let dir = app.path || "";
+  if (dir) {
+    const lastSlash = Math.max(dir.lastIndexOf("/"), dir.lastIndexOf("\\"));
+    if (lastSlash > 0) {
+      dir = dir.substring(0, lastSlash);
+    }
+  }
+  router.push({
+    path: "/terminal",
+    query: { dir }
+  });
+};
 
 const searchQuery = ref("");
 const loading = ref(false);

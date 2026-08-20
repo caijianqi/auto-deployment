@@ -32,7 +32,7 @@ mybatis-plus:
 sa-token:
   token-name: satoken
   timeout: 2592000
-  active-timeout: -1
+  active-timeout: 3600 # 1小时无操作自动过期下线（3600秒）
   is-concurrent: true
   is-share: true
   token-style: uuid

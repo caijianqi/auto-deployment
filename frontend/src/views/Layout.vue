@@ -39,6 +39,10 @@
             <el-icon><Files /></el-icon>
             <span>文件管理</span>
           </el-menu-item>
+          <el-menu-item index="/terminal">
+            <el-icon><Terminal /></el-icon>
+            <span>终端控制台</span>
+          </el-menu-item>
         </el-menu>
         
         <div class="p-4 border-t border-gray-700">
@@ -111,7 +115,8 @@ import {
   Search,
   LogOut,
   Server,
-  Files
+  Files,
+  Terminal
 } from 'lucide-vue-next'
 import { ElMessage } from 'element-plus'
 
