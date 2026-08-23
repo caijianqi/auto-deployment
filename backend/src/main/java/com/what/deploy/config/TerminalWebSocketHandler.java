@@ -67,6 +67,11 @@ public class TerminalWebSocketHandler extends TextWebSocketHandler {
             } catch (Exception ignored) {
             }
             if (process != null && process.isAlive()) {
+                // 先销毁所有子进程（setsid 会话中的进程树）
+                try {
+                    process.descendants().forEach(ProcessHandle::destroyForcibly);
+                } catch (Exception ignored) {
+                }
                 process.destroyForcibly();
             }
             if (readerThread != null && readerThread.isAlive()) {
@@ -106,6 +111,7 @@ public class TerminalWebSocketHandler extends TextWebSocketHandler {
         // 确定 Shell 命令与编码
         List<String> command = new ArrayList<>();
         Charset charset;
+        String shellName; // 记录实际 shell 名称（用于欢迎信息展示）
 
         if (OSUtil.isWindows()) {
             // Windows 编码策略：中文 Windows CMD/PowerShell 默认是 GBK，若指定则依参数
@@ -131,6 +137,7 @@ public class TerminalWebSocketHandler extends TextWebSocketHandler {
                 command.add("-NoLogo");
                 command.add("-NoExit");
             }
+            shellName = command.get(0);
         } else {
             // Linux / Unix 默认 UTF-8
             if (StrUtil.isNotBlank(charsetParam)) {
@@ -150,10 +157,22 @@ public class TerminalWebSocketHandler extends TextWebSocketHandler {
                 File bash = new File("/bin/bash");
                 if (bash.exists()) {
                     command.add("/bin/bash");
+                    command.add("--norc");
+                    command.add("--noprofile");
                     command.add("-i");
                 } else {
                     command.add("/bin/sh");
                     command.add("-i");
+                }
+            }
+            shellName = command.get(0);
+
+            // 使用 setsid 创建新会话，使子进程脱离父进程的控制终端
+            // 防止 -i 模式下子进程的 SIGTTIN/SIGTTOU 信号传播到 Java 父进程导致 Stopped
+            for (String setsidPath : new String[]{"/usr/bin/setsid", "/bin/setsid"}) {
+                if (new File(setsidPath).exists()) {
+                    command.add(0, setsidPath);
+                    break;
                 }
             }
         }
@@ -167,8 +186,12 @@ public class TerminalWebSocketHandler extends TextWebSocketHandler {
         Map<String, String> env = pb.environment();
         env.put("TERM", "xterm-256color");
         if (!OSUtil.isWindows()) {
-            env.put("LANG", "zh_CN.UTF-8");
-            env.put("LC_ALL", "zh_CN.UTF-8");
+            // 使用 C.UTF-8 而非 zh_CN.UTF-8，避免服务器未安装中文 locale 时报错
+            env.put("LANG", "C.UTF-8");
+            env.put("LC_ALL", "C.UTF-8");
+            // --norc --noprofile 不会加载 .bashrc，需要手动设置 PS1 提示符
+            // 格式: user@host:workdir$ (家目录显示为~)
+            env.put("PS1", "\\" + "u@\\h:\\w\\$ ");
         }
         pb.redirectErrorStream(true);
 
@@ -189,14 +212,27 @@ public class TerminalWebSocketHandler extends TextWebSocketHandler {
         // 异步流泵送线程
         Thread readerThread = new Thread(() -> {
             byte[] buffer = new byte[4096];
+            // 标记是否仍在启动阶段（仅在启动阶段过滤已知警告）
+            boolean startupPhase = true;
+            int readCount = 0;
             try {
                 int len;
                 while ((len = processOut.read(buffer)) != -1) {
                     if (session.isOpen()) {
                         String text = new String(buffer, 0, len, finalCharset);
-                        synchronized (session) {
-                            if (session.isOpen()) {
-                                session.sendMessage(new TextMessage(text));
+                        // 启动阶段过滤 setsid 导致的已知 bash 警告
+                        if (startupPhase) {
+                            text = text.replace("bash: cannot set terminal process group (-1): Inappropriate ioctl for device\n", "");
+                            text = text.replace("bash: no job control in this shell\n", "");
+                            if (++readCount > 5) {
+                                startupPhase = false;
+                            }
+                        }
+                        if (!text.isEmpty()) {
+                            synchronized (session) {
+                                if (session.isOpen()) {
+                                    session.sendMessage(new TextMessage(text));
+                                }
                             }
                         }
                     }
@@ -220,15 +256,18 @@ public class TerminalWebSocketHandler extends TextWebSocketHandler {
         }, "Terminal-Reader-" + session.getId());
 
         readerThread.setDaemon(true);
-        readerThread.start();
 
         sessions.put(session.getId(), new TerminalProcessContext(process, processIn, charset, readerThread));
 
-        // 发送欢迎信息与环境提示
+        // 必须先发送欢迎信息，再启动 reader 线程
+        // 否则 reader 线程和主线程会同时写 WebSocket 导致 TEXT_PARTIAL_WRITING 异常
         String welcome = String.format("\u001b[36m=== 自动化运维平台 Web 终端已连接 ===\u001b[0m\r\n" +
                         "\u001b[90m系统环境: %s | 终端核心: %s | 工作目录: %s | 字符编码: %s\u001b[0m\r\n\r\n",
-                OSUtil.getOS(), command.get(0), workDir.getAbsolutePath(), charset.name());
+                OSUtil.getOS(), shellName, workDir.getAbsolutePath(), charset.name());
         session.sendMessage(new TextMessage(welcome));
+
+        // 欢迎信息发送完毕后再启动 reader 线程，保证不会并发写 WebSocket
+        readerThread.start();
     }
 
     @Override

@@ -600,11 +600,7 @@ const isRoot = computed(() => !currentPath.value)
 // Breadcrumbs Parsing
 const breadcrumbs = computed(() => {
   if (!currentPath.value) return []
-  let parts = currentPath.value.split(/[\\\/]/).filter(p => p !== '')
-  if (currentPath.value.startsWith('/') && parts.length > 0) {
-    return ['', ...parts]
-  }
-  return parts
+  return currentPath.value.split(/[\\\/]/).filter(p => p !== '')
 })
 
 // Check file types
@@ -733,16 +729,12 @@ const goBack = () => {
 
 // Jump to Breadcrumb Index
 const jumpTo = (index) => {
-  if (index === 0 && breadcrumbs.value[0] === '') {
-    loadFiles('/')
-    return
-  }
   let parts = breadcrumbs.value.slice(0, index + 1)
   let isLinux = currentPath.value.startsWith('/')
   let path = ''
   
   if (isLinux) {
-    path = '/' + parts.filter(p => p !== '').join('/')
+    path = '/' + parts.join('/')
   } else {
     path = parts.join('\\')
     if (path.length === 2 && path.endsWith(':')) {

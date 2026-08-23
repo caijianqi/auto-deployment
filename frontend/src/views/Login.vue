@@ -7,7 +7,7 @@
         <p class="text-gray-400 text-sm mt-2">高效应用生命周期管理</p>
       </div>
       
-      <el-form :model="loginForm" label-position="top">
+      <el-form :model="loginForm" label-position="top" @submit.prevent="handleLogin" @keyup.enter="handleLogin">
         <el-form-item label="账号">
           <el-input 
             v-model="loginForm.username" 

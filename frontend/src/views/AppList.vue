@@ -153,6 +153,7 @@
       ref="deployDialogRef"
       :app-type="currentApp?.type"
       :uploading="uploading"
+      :upload-progress="uploadProgress"
       @file-change="handleFileChange"
       @submit="submitUpload"
     />
@@ -227,6 +228,7 @@ const showLogDrawer = ref(false);
 const showHistoryDrawer = ref(false);
 const showBackupDrawer = ref(false);
 const uploading = ref(false);
+const uploadProgress = ref(0);
 const historyLoading = ref(false);
 const backupLoading = ref(false);
 const historyLogs = ref([]);
@@ -397,10 +399,13 @@ const saveApp = async () => {
 
     if (!editingApp.value && selectedNewFile.value) {
       uploading.value = true;
+      uploadProgress.value = 0;
       const formData = new FormData();
       formData.append("file", selectedNewFile.value);
       try {
-        const deployRes = await api.apps.deploy(res.data.id, formData);
+        const deployRes = await api.apps.deploy(res.data.id, formData, (e) => {
+          if (e.total > 0) uploadProgress.value = Math.round((e.loaded / e.total) * 100);
+        });
         if (deployRes.code === 200) {
           ElMessage.success("应用已创建并部署成功");
           selectedNewFile.value = null;
@@ -414,6 +419,7 @@ const saveApp = async () => {
         ElMessage.warning("应用已创建，但初始部署失败: " + msg);
       } finally {
         uploading.value = false;
+        uploadProgress.value = 0;
       }
     } else {
       ElMessage.success(
@@ -512,10 +518,13 @@ const handleFileChange = (file) => {
 const submitUpload = async () => {
   if (!selectedFile.value) return;
   uploading.value = true;
+  uploadProgress.value = 0;
   const formData = new FormData();
   formData.append("file", selectedFile.value);
   try {
-    const res = await api.apps.deploy(currentApp.value.id, formData);
+    const res = await api.apps.deploy(currentApp.value.id, formData, (e) => {
+      if (e.total > 0) uploadProgress.value = Math.round((e.loaded / e.total) * 100);
+    });
     if (res.code === 200) {
       ElMessage.success("部署成功");
       showUploadDialog.value = false;
@@ -527,6 +536,7 @@ const submitUpload = async () => {
     ElMessage.error("部署失败: " + (e.response?.data?.msg || e.message));
   } finally {
     uploading.value = false;
+    uploadProgress.value = 0;
   }
 };
 

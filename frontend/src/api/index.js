@@ -2,10 +2,10 @@ import axios from 'axios'
 
 const api = axios.create({
   // 生产环境 VITE_APP_API_PREFIX 为 /auto/api，末尾加 / 确保 Axios 拼接成功
-  baseURL: (import.meta.env.VITE_APP_API_PREFIX || '/api').endsWith('/') 
-    ? (import.meta.env.VITE_APP_API_PREFIX || '/api') 
+  baseURL: (import.meta.env.VITE_APP_API_PREFIX || '/api').endsWith('/')
+    ? (import.meta.env.VITE_APP_API_PREFIX || '/api')
     : (import.meta.env.VITE_APP_API_PREFIX || '/api') + '/',
-  timeout: 10000
+  timeout: 300000
 })
 
 api.interceptors.request.use(config => {

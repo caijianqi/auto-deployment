@@ -412,7 +412,7 @@ const initTerminalInstance = (tab) => {
       tab.historyIndex = -1
       tab.inputBuffer = ''
       tab.cursorPos = 0
-      tab.socket.send(cmdToSend + '\r\n')
+      tab.socket.send(cmdToSend + '\n')
       return
     }
 
@@ -610,16 +610,28 @@ const connectWebSocket = (tab) => {
     if (tab.xterm) {
       tab.xterm.focus()
     }
+    // 每 30 秒发送心跳，防止 Nginx 代理 60 秒超时断开
+    tab.heartbeatTimer = setInterval(() => {
+      if (socket.readyState === WebSocket.OPEN) {
+        socket.send('{"type":"ping"}')
+      }
+    }, 30000)
   }
 
   socket.onmessage = (event) => {
     if (tab.xterm) {
+      // 过滤心跳 pong 响应，不显示到终端
+      if (event.data === '{"type":"pong"}') return
       tab.xterm.write(event.data)
     }
   }
 
   socket.onerror = () => {
     tab.status = 'disconnected'
+    if (tab.heartbeatTimer) {
+      clearInterval(tab.heartbeatTimer)
+      tab.heartbeatTimer = null
+    }
     if (tab.xterm) {
       tab.xterm.write('\r\n\u001b[31m[错误] WebSocket 连接发生错误\u001b[0m\r\n')
     }
@@ -627,6 +639,10 @@ const connectWebSocket = (tab) => {
 
   socket.onclose = (event) => {
     tab.status = 'disconnected'
+    if (tab.heartbeatTimer) {
+      clearInterval(tab.heartbeatTimer)
+      tab.heartbeatTimer = null
+    }
     if (tab.xterm) {
       tab.xterm.write(`\r\n\u001b[33m[连接断开] 代码: ${event.code} 原因: ${event.reason || '会话已终止'}\u001b[0m\r\n`)
     }
@@ -782,6 +798,10 @@ const closeTab = (tabId) => {
 
   const tabToClose = tabs.value[idx]
   // Cleanup resources
+  if (tabToClose.heartbeatTimer) {
+    clearInterval(tabToClose.heartbeatTimer)
+    tabToClose.heartbeatTimer = null
+  }
   if (tabToClose.socket) {
     try { tabToClose.socket.close() } catch (e) {}
   }
@@ -843,6 +863,10 @@ onBeforeUnmount(() => {
   window.removeEventListener('resize', handleWindowResize)
   // Cleanup all tabs
   tabs.value.forEach(tab => {
+    if (tab.heartbeatTimer) {
+      clearInterval(tab.heartbeatTimer)
+      tab.heartbeatTimer = null
+    }
     if (tab.socket) {
       try { tab.socket.close() } catch (e) {}
     }
