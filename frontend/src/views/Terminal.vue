@@ -318,6 +318,136 @@ const createNewTab = async (customConfig = {}) => {
   initTerminalInstance(newTab)
 }
 
+// Calculate terminal display width for a character (handles ASCII, CJK wide chars, emojis)
+const getCharWidth = (char) => {
+  const code = char.codePointAt(0)
+  if (code < 32 || (code >= 0x7f && code < 0xa0)) {
+    return 0
+  }
+  // CJK ranges & fullwidth forms
+  if (
+    (code >= 0x1100 && code <= 0x115f) ||
+    (code >= 0x2e80 && code <= 0xa4cf && code !== 0x303f) ||
+    (code >= 0xac00 && code <= 0xd7a3) ||
+    (code >= 0xf900 && code <= 0xfaff) ||
+    (code >= 0xfe10 && code <= 0xfe19) ||
+    (code >= 0xfe30 && code <= 0xfe6f) ||
+    (code >= 0xff00 && code <= 0xff60) ||
+    (code >= 0xffe0 && code <= 0xffe6) ||
+    (code >= 0x20000 && code <= 0x2fffd) ||
+    (code >= 0x30000 && code <= 0x3fffd)
+  ) {
+    return 2
+  }
+  // Emoji ranges
+  if (
+    (code >= 0x1f300 && code <= 0x1f64f) ||
+    (code >= 0x1f680 && code <= 0x1f6ff) ||
+    (code >= 0x2600 && code <= 0x26ff) ||
+    (code >= 0x2700 && code <= 0x27bf)
+  ) {
+    return 2
+  }
+  return 1
+}
+
+// Calculate terminal display width for a string
+const getStringWidth = (str) => {
+  if (!str) return 0
+  let width = 0
+  for (const char of str) {
+    width += getCharWidth(char)
+  }
+  return width
+}
+
+// Replace current input on screen cleanly with a new buffer and cursor position
+const redrawInput = (tab, newBuffer, newCursorPos) => {
+  const xterm = tab.xterm
+  if (!xterm) return
+
+  // Move cursor from current position back to start of input
+  const currentBefore = tab.inputBuffer.slice(0, tab.cursorPos)
+  const currentBeforeWidth = getStringWidth(currentBefore)
+  let cmd = ''
+  if (currentBeforeWidth > 0) {
+    cmd += '\b'.repeat(currentBeforeWidth)
+  }
+  // Clear from cursor to end of line
+  cmd += '\x1b[K'
+  // Write new buffer content
+  cmd += newBuffer
+  xterm.write(cmd)
+
+  // Move cursor back if newCursorPos is before end of newBuffer
+  const newAfter = newBuffer.slice(newCursorPos)
+  const newAfterWidth = getStringWidth(newAfter)
+  if (newAfterWidth > 0) {
+    xterm.write('\b'.repeat(newAfterWidth))
+  }
+
+  tab.inputBuffer = newBuffer
+  tab.cursorPos = newCursorPos
+}
+
+// Execute command from input buffer
+const executeCommand = (tab, cmdToSend) => {
+  const xterm = tab.xterm
+  if (cmdToSend.trim().length > 0) {
+    if (tab.history.length === 0 || tab.history[tab.history.length - 1] !== cmdToSend) {
+      tab.history.push(cmdToSend)
+      if (tab.history.length > 200) tab.history.shift()
+    }
+  }
+  tab.historyIndex = -1
+  tab.inputBuffer = ''
+  tab.cursorPos = 0
+  if (xterm) {
+    xterm.write('\r\n')
+  }
+  if (tab.socket && tab.socket.readyState === WebSocket.OPEN) {
+    tab.socket.send(cmdToSend + '\n')
+  }
+}
+
+// Handle multi-line pasted text or command batch
+const handleMultiLineInput = (tab, text) => {
+  const xterm = tab.xterm
+  if (!xterm) return
+
+  const normalized = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+  const lines = normalized.split('\n')
+
+  const before = tab.inputBuffer.slice(0, tab.cursorPos)
+  const after = tab.inputBuffer.slice(tab.cursorPos)
+
+  // Line 0 merges with what was before the cursor
+  const firstLine = before + lines[0]
+  xterm.write(lines[0])
+  executeCommand(tab, firstLine)
+
+  // Intermediate lines execute directly
+  for (let i = 1; i < lines.length - 1; i++) {
+    const line = lines[i]
+    xterm.write(line)
+    executeCommand(tab, line)
+  }
+
+  // Last line
+  const lastLine = lines[lines.length - 1]
+  if (lastLine.length > 0 || after.length > 0) {
+    const finalBuffer = lastLine + after
+    const finalCursorPos = lastLine.length
+    tab.inputBuffer = finalBuffer
+    tab.cursorPos = finalCursorPos
+    xterm.write(finalBuffer)
+    const afterWidth = getStringWidth(after)
+    if (afterWidth > 0) {
+      xterm.write('\b'.repeat(afterWidth))
+    }
+  }
+}
+
 // Initialize Xterm and WebSocket for a Tab
 const initTerminalInstance = (tab) => {
   const container = tabDomRefs.get(tab.id)
@@ -382,7 +512,7 @@ const initTerminalInstance = (tab) => {
   // 3. Connect WebSocket
   connectWebSocket(tab)
 
-  // 4. Handle Terminal User Input -> Full Line Editor with Backspace/Delete/History support
+  // 4. Handle Terminal User Input -> Full Line Editor with Backspace/Delete/History/Paste support
   xterm.onData((data) => {
     if (!tab.socket || tab.socket.readyState !== WebSocket.OPEN) {
       return
@@ -395,39 +525,50 @@ const initTerminalInstance = (tab) => {
       }
     }
 
-    // A. Enter Key (\r or \n or \r\n)
-    if (data === '\r' || data === '\n' || data === '\r\n') {
-      const cmdToSend = tab.inputBuffer
-      if (cmdToSend.trim().length > 0) {
-        if (tab.history.length === 0 || tab.history[tab.history.length - 1] !== cmdToSend) {
-          tab.history.push(cmdToSend)
-          if (tab.history.length > 200) tab.history.shift()
-        }
+    // A. 包含换行符（回车键或多行粘贴/带换行的单行粘贴）
+    if (data.includes('\r') || data.includes('\n')) {
+      const normalized = data.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+      const lines = normalized.split('\n')
+      if (lines.length === 1 || (lines.length === 2 && lines[0] === '' && lines[1] === '')) {
+        // 单纯按下回车键
+        executeCommand(tab, tab.inputBuffer)
+        return
       }
-      // 清理前端本地输入的预显字符，由系统 Shell 的回显原生接管（显示命令与下一个 C:\Users\... 提示符）
-      if (tab.inputBuffer.length > 0) {
-        const erase = '\b'.repeat(tab.cursorPos) + ' '.repeat(tab.inputBuffer.length) + '\b'.repeat(tab.inputBuffer.length)
-        xterm.write(erase)
-      }
-      tab.historyIndex = -1
-      tab.inputBuffer = ''
-      tab.cursorPos = 0
-      tab.socket.send(cmdToSend + '\n')
+      // 多行文本粘贴
+      handleMultiLineInput(tab, data)
       return
     }
 
     // B. Backspace Key (\x7f or \x08 or ASCII 127) -> Accurately delete character before cursor
     if (data === '\x7f' || data === '\x08') {
       if (tab.cursorPos > 0) {
-        const before = tab.inputBuffer.slice(0, tab.cursorPos - 1)
+        const before = tab.inputBuffer.slice(0, tab.cursorPos)
         const after = tab.inputBuffer.slice(tab.cursorPos)
-        tab.inputBuffer = before + after
-        tab.cursorPos--
 
-        // Visual erase & redraw
-        const tail = after + ' '
-        const moveBack = '\b'.repeat(tail.length)
-        xterm.write('\b' + tail + moveBack)
+        // 处理代理对（如 Emoji / 拓展 Unicode）
+        let delLen = 1
+        if (tab.cursorPos >= 2) {
+          const code = tab.inputBuffer.charCodeAt(tab.cursorPos - 1)
+          const prevCode = tab.inputBuffer.charCodeAt(tab.cursorPos - 2)
+          if (code >= 0xDC00 && code <= 0xDFFF && prevCode >= 0xD800 && prevCode <= 0xDBFF) {
+            delLen = 2
+          }
+        }
+
+        const deletedChar = before.slice(-delLen)
+        const newBefore = before.slice(0, -delLen)
+        const charWidth = getStringWidth(deletedChar)
+        const afterWidth = getStringWidth(after)
+
+        tab.inputBuffer = newBefore + after
+        tab.cursorPos -= delLen
+
+        // 视觉擦除：光标左移对应字宽 -> 清除右侧到行尾 -> 重绘 after 内容 -> 光标移回正确插入点
+        let redraw = '\b'.repeat(charWidth) + '\x1b[K' + after
+        if (afterWidth > 0) {
+          redraw += '\b'.repeat(afterWidth)
+        }
+        xterm.write(redraw)
       }
       return
     }
@@ -436,12 +577,27 @@ const initTerminalInstance = (tab) => {
     if (data === '\x1b[3~') {
       if (tab.cursorPos < tab.inputBuffer.length) {
         const before = tab.inputBuffer.slice(0, tab.cursorPos)
-        const after = tab.inputBuffer.slice(tab.cursorPos + 1)
-        tab.inputBuffer = before + after
+        const after = tab.inputBuffer.slice(tab.cursorPos)
 
-        const tail = after + ' '
-        const moveBack = '\b'.repeat(tail.length)
-        xterm.write(tail + moveBack)
+        let delLen = 1
+        if (after.length >= 2) {
+          const code = after.charCodeAt(0)
+          const nextCode = after.charCodeAt(1)
+          if (code >= 0xD800 && code <= 0xDBFF && nextCode >= 0xDC00 && nextCode <= 0xDFFF) {
+            delLen = 2
+          }
+        }
+
+        const newAfter = after.slice(delLen)
+        const newAfterWidth = getStringWidth(newAfter)
+
+        tab.inputBuffer = before + newAfter
+
+        let redraw = '\x1b[K' + newAfter
+        if (newAfterWidth > 0) {
+          redraw += '\b'.repeat(newAfterWidth)
+        }
+        xterm.write(redraw)
       }
       return
     }
@@ -455,8 +611,21 @@ const initTerminalInstance = (tab) => {
     // D. Left Arrow (\x1b[D)
     if (data === '\x1b[D') {
       if (tab.cursorPos > 0) {
-        tab.cursorPos--
-        xterm.write('\x1b[D')
+        const before = tab.inputBuffer.slice(0, tab.cursorPos)
+        let step = 1
+        if (tab.cursorPos >= 2) {
+          const code = tab.inputBuffer.charCodeAt(tab.cursorPos - 1)
+          const prevCode = tab.inputBuffer.charCodeAt(tab.cursorPos - 2)
+          if (code >= 0xDC00 && code <= 0xDFFF && prevCode >= 0xD800 && prevCode <= 0xDBFF) {
+            step = 2
+          }
+        }
+        const prevChar = before.slice(-step)
+        const charWidth = getStringWidth(prevChar)
+        tab.cursorPos -= step
+        if (charWidth > 0) {
+          xterm.write('\b'.repeat(charWidth))
+        }
       }
       return
     }
@@ -464,8 +633,21 @@ const initTerminalInstance = (tab) => {
     // E. Right Arrow (\x1b[C)
     if (data === '\x1b[C') {
       if (tab.cursorPos < tab.inputBuffer.length) {
-        tab.cursorPos++
-        xterm.write('\x1b[C')
+        const after = tab.inputBuffer.slice(tab.cursorPos)
+        let step = 1
+        if (after.length >= 2) {
+          const code = after.charCodeAt(0)
+          const nextCode = after.charCodeAt(1)
+          if (code >= 0xD800 && code <= 0xDBFF && nextCode >= 0xDC00 && nextCode <= 0xDFFF) {
+            step = 2
+          }
+        }
+        const nextChar = after.slice(0, step)
+        const charWidth = getStringWidth(nextChar)
+        tab.cursorPos += step
+        if (charWidth > 0) {
+          xterm.write('\x1b[' + charWidth + 'C')
+        }
       }
       return
     }
@@ -473,7 +655,11 @@ const initTerminalInstance = (tab) => {
     // F. Home Key (\x1b[H or \x1b[1~ or \x1bOH)
     if (data === '\x1b[H' || data === '\x1b[1~' || data === '\x1bOH') {
       if (tab.cursorPos > 0) {
-        xterm.write('\b'.repeat(tab.cursorPos))
+        const before = tab.inputBuffer.slice(0, tab.cursorPos)
+        const width = getStringWidth(before)
+        if (width > 0) {
+          xterm.write('\b'.repeat(width))
+        }
         tab.cursorPos = 0
       }
       return
@@ -482,7 +668,11 @@ const initTerminalInstance = (tab) => {
     // G. End Key (\x1b[F or \x1b[4~ or \x1bOF)
     if (data === '\x1b[F' || data === '\x1b[4~' || data === '\x1bOF') {
       if (tab.cursorPos < tab.inputBuffer.length) {
-        xterm.write(tab.inputBuffer.slice(tab.cursorPos))
+        const after = tab.inputBuffer.slice(tab.cursorPos)
+        const width = getStringWidth(after)
+        if (width > 0) {
+          xterm.write('\x1b[' + width + 'C')
+        }
         tab.cursorPos = tab.inputBuffer.length
       }
       return
@@ -497,17 +687,7 @@ const initTerminalInstance = (tab) => {
           tab.historyIndex--
         }
         const prevCmd = tab.history[tab.historyIndex]
-
-        // Clear current line on screen
-        if (tab.cursorPos > 0) {
-          xterm.write('\b'.repeat(tab.cursorPos))
-        }
-        xterm.write(' '.repeat(tab.inputBuffer.length))
-        xterm.write('\b'.repeat(tab.inputBuffer.length))
-
-        tab.inputBuffer = prevCmd
-        tab.cursorPos = tab.inputBuffer.length
-        xterm.write(tab.inputBuffer)
+        redrawInput(tab, prevCmd, prevCmd.length)
       }
       return
     }
@@ -518,26 +698,10 @@ const initTerminalInstance = (tab) => {
         if (tab.historyIndex < tab.history.length - 1) {
           tab.historyIndex++
           const nextCmd = tab.history[tab.historyIndex]
-
-          if (tab.cursorPos > 0) {
-            xterm.write('\b'.repeat(tab.cursorPos))
-          }
-          xterm.write(' '.repeat(tab.inputBuffer.length))
-          xterm.write('\b'.repeat(tab.inputBuffer.length))
-
-          tab.inputBuffer = nextCmd
-          tab.cursorPos = tab.inputBuffer.length
-          xterm.write(tab.inputBuffer)
+          redrawInput(tab, nextCmd, nextCmd.length)
         } else {
           tab.historyIndex = -1
-          if (tab.cursorPos > 0) {
-            xterm.write('\b'.repeat(tab.cursorPos))
-          }
-          xterm.write(' '.repeat(tab.inputBuffer.length))
-          xterm.write('\b'.repeat(tab.inputBuffer.length))
-
-          tab.inputBuffer = ''
-          tab.cursorPos = 0
+          redrawInput(tab, '', 0)
         }
       }
       return
@@ -558,6 +722,11 @@ const initTerminalInstance = (tab) => {
       xterm.clear()
       if (tab.inputBuffer) {
         xterm.write(tab.inputBuffer)
+        const after = tab.inputBuffer.slice(tab.cursorPos)
+        const afterWidth = getStringWidth(after)
+        if (afterWidth > 0) {
+          xterm.write('\b'.repeat(afterWidth))
+        }
       }
       return
     }
@@ -567,18 +736,23 @@ const initTerminalInstance = (tab) => {
       return
     }
 
-    // M. Printable Characters / Chinese / Paste Text
+    // M. Printable Characters / Chinese / Single-line Paste Text
+    const cleanData = data.replace(/[\x00-\x08\x0b-\x1a\x1c-\x1f\x7f]/g, '')
+    if (cleanData.length === 0) return
+
     const before = tab.inputBuffer.slice(0, tab.cursorPos)
     const after = tab.inputBuffer.slice(tab.cursorPos)
-    tab.inputBuffer = before + data + after
-    tab.cursorPos += data.length
+    tab.inputBuffer = before + cleanData + after
+    tab.cursorPos += cleanData.length
 
     if (after.length === 0) {
-      xterm.write(data)
+      xterm.write(cleanData)
     } else {
-      const tail = data + after
-      const moveBack = '\b'.repeat(after.length)
-      xterm.write(tail + moveBack)
+      const afterWidth = getStringWidth(after)
+      xterm.write('\x1b[K' + cleanData + after)
+      if (afterWidth > 0) {
+        xterm.write('\b'.repeat(afterWidth))
+      }
     }
   })
 }
@@ -662,20 +836,9 @@ const handleTabCompletion = async (tab) => {
     tab.completionState.currentIndex = (tab.completionState.currentIndex + 1) % candidates.length
     const match = candidates[tab.completionState.currentIndex]
 
-    // 擦除当前屏幕上的本地输入行
-    if (tab.cursorPos > 0) {
-      xterm.write('\b'.repeat(tab.cursorPos))
-    }
-    xterm.write(' '.repeat(tab.inputBuffer.length))
-    xterm.write('\b'.repeat(tab.inputBuffer.length))
-
-    // 原地替换为下一个匹配项并重绘
-    tab.inputBuffer = tab.completionState.beforeText + match + tab.completionState.afterText
-    tab.cursorPos = tab.completionState.beforeText.length + match.length
-    xterm.write(tab.inputBuffer)
-    if (tab.completionState.afterText.length > 0) {
-      xterm.write('\b'.repeat(tab.completionState.afterText.length))
-    }
+    const newBuffer = tab.completionState.beforeText + match + tab.completionState.afterText
+    const newCursorPos = tab.completionState.beforeText.length + match.length
+    redrawInput(tab, newBuffer, newCursorPos)
     return
   }
 
@@ -711,21 +874,9 @@ const handleTabCompletion = async (tab) => {
       }
 
       const match = candidates[0]
-
-      // 擦除当前屏幕上的输入
-      if (tab.cursorPos > 0) {
-        xterm.write('\b'.repeat(tab.cursorPos))
-      }
-      xterm.write(' '.repeat(tab.inputBuffer.length))
-      xterm.write('\b'.repeat(tab.inputBuffer.length))
-
-      // 补全第 1 个匹配项
-      tab.inputBuffer = before + match + after
-      tab.cursorPos = before.length + match.length
-      xterm.write(tab.inputBuffer)
-      if (after.length > 0) {
-        xterm.write('\b'.repeat(after.length))
-      }
+      const newBuffer = before + match + after
+      const newCursorPos = before.length + match.length
+      redrawInput(tab, newBuffer, newCursorPos)
     }
   } catch (e) {
     console.error('Tab completion error:', e)
