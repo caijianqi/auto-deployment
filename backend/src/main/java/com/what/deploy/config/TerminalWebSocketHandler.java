@@ -276,28 +276,28 @@ public class TerminalWebSocketHandler extends TextWebSocketHandler {
         }
 
         String payload = message.getPayload();
-        if (StrUtil.isBlank(payload)) {
+        // 注意：切勿使用 StrUtil.isBlank(payload)！
+        // 终端用户的回车(\r)、换行(\n)、空格( )、制表符(\t)等全属于不可或缺的字符，isBlank 会将其全当空白误杀！
+        if (payload == null || payload.isEmpty()) {
             return;
         }
 
-        String trimmed = payload.trim();
-
         // 1. 兼容前缀控制帧（若前端使用带前缀的控制包）
-        if (trimmed.startsWith(CTRL_PREFIX)) {
-            String json = trimmed.substring(CTRL_PREFIX.length()).trim();
+        if (payload.startsWith(CTRL_PREFIX)) {
+            String json = payload.substring(CTRL_PREFIX.length()).trim();
             handleControlFrame(session, ctx, json);
             return;
         }
 
         // 2. 识别标准纯 JSON 控制帧（{"type":"resize", ...} 或 {"type":"ping"}）
-        if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
-            if (trimmed.contains("\"type\":\"ping\"") || trimmed.contains("\"type\":\"resize\"")) {
-                handleControlFrame(session, ctx, trimmed);
+        if (payload.startsWith("{") && payload.endsWith("}")) {
+            if (payload.contains("\"type\":\"ping\"") || payload.contains("\"type\":\"resize\"")) {
+                handleControlFrame(session, ctx, payload);
                 return;
             }
         }
 
-        // 3. 原生按键输入透传至 PTY
+        // 3. 原生按键输入透传至 PTY（包括回车、空格、Tab、字母及控制字符）
         byte[] bytes = payload.getBytes(ctx.getCharset());
         try {
             ctx.getOutputStream().write(bytes);

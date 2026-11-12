@@ -229,24 +229,24 @@
       class="fixed z-50 bg-[#1e1e24] border border-gray-700 rounded-lg shadow-2xl py-1 text-xs text-gray-200 w-44 font-mono select-none"
       @click.stop
     >
-      <div @click="copySelection" class="flex items-center gap-2 px-3 py-2 hover:bg-indigo-600 hover:text-white cursor-pointer transition-colors">
+      <div @click="copySelection()" class="flex items-center gap-2 px-3 py-2 hover:bg-indigo-600 hover:text-white cursor-pointer transition-colors">
         <Copy :size="14" />
         <span>复制选中内容</span>
       </div>
-      <div @click="pasteFromClipboard" class="flex items-center gap-2 px-3 py-2 hover:bg-indigo-600 hover:text-white cursor-pointer transition-colors">
+      <div @click="pasteFromClipboard()" class="flex items-center gap-2 px-3 py-2 hover:bg-indigo-600 hover:text-white cursor-pointer transition-colors">
         <Clipboard :size="14" />
         <span>粘贴到终端</span>
       </div>
       <div class="h-px bg-gray-700 my-1"></div>
-      <div @click="clearActiveTerminal" class="flex items-center gap-2 px-3 py-2 hover:bg-indigo-600 hover:text-white cursor-pointer transition-colors">
+      <div @click="clearActiveTerminal()" class="flex items-center gap-2 px-3 py-2 hover:bg-indigo-600 hover:text-white cursor-pointer transition-colors">
         <Eraser :size="14" />
         <span>清空屏幕 (Clear)</span>
       </div>
-      <div @click="reconnectActiveTerminal" class="flex items-center gap-2 px-3 py-2 hover:bg-indigo-600 hover:text-white cursor-pointer transition-colors">
+      <div @click="reconnectActiveTerminal()" class="flex items-center gap-2 px-3 py-2 hover:bg-indigo-600 hover:text-white cursor-pointer transition-colors">
         <RotateCcw :size="14" />
         <span>重新连接会话</span>
       </div>
-      <div @click="exportTerminalLog" class="flex items-center gap-2 px-3 py-2 hover:bg-indigo-600 hover:text-white cursor-pointer transition-colors">
+      <div @click="exportTerminalLog()" class="flex items-center gap-2 px-3 py-2 hover:bg-indigo-600 hover:text-white cursor-pointer transition-colors">
         <Download :size="14" />
         <span>导出终端日志</span>
       </div>
@@ -778,24 +778,71 @@ const copySelection = () => {
   closeContextMenu()
 }
 
-const pasteFromClipboard = async (targetTab = null) => {
-  const tab = targetTab || currentTab.value
-  if (!tab || !tab.xterm) {
-    closeContextMenu()
+// 模拟原生击键流分发（绕过 Bracketed Paste 压制，实现逐行自动回车执行）
+const smoothPaste = async (tab, rawText) => {
+  if (!tab || !tab.socket || tab.socket.readyState !== WebSocket.OPEN || !rawText) return
+
+  // 1. 规范化不同操作系统的换行符为统一的 \n
+  const normalized = rawText.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+
+  // 2. 单行文本直接通过原生按键通道注入
+  if (!normalized.includes('\n')) {
+    tab.socket.send(normalized)
+    tab.xterm?.focus()
     return
   }
 
+  // 3. 多行命令切片分发：绕过 xterm.paste 的转义括号，直接发送原生按键流并自动触发回车 \r 执行
+  const lines = normalized.split('\n')
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]
+    if (line.trim().length === 0 && i === lines.length - 1) {
+      // 若最后一行是空行则忽略
+      continue
+    }
+
+    // 每一行均追加标准回车符 \r，通知 Shell 立即执行当前命令
+    tab.socket.send(line + '\r')
+
+    // 给后台 Bash 留出执行、输出及刷新行提示符的时间窗口（50ms）
+    if (i < lines.length - 1) {
+      await new Promise(resolve => setTimeout(resolve, 50))
+    }
+  }
+
+  tab.xterm?.focus()
+}
+
+const pasteFromClipboard = async (targetTab = null) => {
+  // 兼容被 @click 默认传递事件对象的情况：若 targetTab 不是合法 Tab 对象，则回退到当前活跃 Tab
+  const tab = (targetTab && targetTab.xterm) ? targetTab : currentTab.value
+  closeContextMenu()
+
+  if (!tab || !tab.xterm) {
+    return
+  }
+
+  // 终端立即重新聚焦
+  tab.xterm.focus()
+
   try {
+    if (!navigator.clipboard || !navigator.clipboard.readText) {
+      ElMessage.warning('当前浏览器环境（非 HTTPS/安全上下文）限制直接读取剪贴板，请直接在终端内按快捷键 Ctrl+V 粘贴')
+      return
+    }
+
     const text = await navigator.clipboard.readText()
     if (text) {
-      // 使用 xterm 原生 paste API 派发
-      // 内部会自动处理 Bracketed Paste Mode 转义包裹，并统一将 CRLF 转化为标准终端换行符
-      tab.xterm.paste(text)
+      // 采用平滑流控分发粘贴内容
+      await smoothPaste(tab, text)
+    } else {
+      ElMessage.info('剪贴板中暂无文本内容')
     }
   } catch (e) {
+    console.warn('Clipboard read error:', e)
     ElMessage.warning('未能获取剪贴板内容，请直接在终端中使用 Ctrl+V 快捷键')
+    tab.xterm.focus()
   }
-  closeContextMenu()
 }
 
 // Export terminal log as file
