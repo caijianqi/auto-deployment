@@ -17,8 +17,11 @@
               <span>{{ isWindows ? '⊞ Windows' : '🐧 Linux' }}</span>
               <span class="text-[10px] text-gray-400">({{ systemInfo.os || '系统识别中' }})</span>
             </span>
+            <span class="px-2 py-0.5 text-[11px] font-mono bg-purple-50 text-purple-700 border border-purple-200 rounded-full">
+              PTY Native
+            </span>
           </div>
-          <p class="text-xs text-gray-500 mt-0.5">跨平台交互式终端，支持 PowerShell / CMD / Bash，毫秒级低延迟执行与流式回显</p>
+          <p class="text-xs text-gray-500 mt-0.5">原生伪终端（PTY）架构，支持 Vim、Top、高亮、动态窗口自适应及毫秒级流式交互</p>
         </div>
       </div>
 
@@ -28,11 +31,11 @@
         <el-popover placement="bottom" :width="380" trigger="click">
           <template #reference>
             <el-button size="default" :icon="FolderOpen" class="!rounded-lg">
-              <span class="max-w-[140px] truncate text-xs">{{ currentTab?.dir || '~ (用户目录)' }}</span>
+              <span class="max-w-[130px] truncate text-xs">{{ currentTab?.dir || '~ (用户目录)' }}</span>
             </el-button>
           </template>
           <div class="space-y-3">
-            <div class="text-xs font-bold text-gray-700">切换工作目录 (新建终端生效)</div>
+            <div class="text-xs font-bold text-gray-700">新建终端工作目录</div>
             <el-input v-model="targetDir" size="small" placeholder="输入绝对路径 (如 C:\ 或 ~)" clearable />
             <div class="flex items-center justify-between pt-1">
               <span class="text-[11px] text-gray-400">默认使用用户主目录 (~)</span>
@@ -40,6 +43,37 @@
             </div>
           </div>
         </el-popover>
+
+        <!-- Snippet Drawer Trigger -->
+        <el-tooltip content="常用运维指令库" placement="top">
+          <el-button size="default" :icon="BookOpen" @click="showSnippetDrawer = true" class="!rounded-lg">
+            常用指令
+          </el-button>
+        </el-tooltip>
+
+        <!-- Font Size Adjuster -->
+        <div class="flex items-center bg-gray-100 rounded-lg p-0.5 border border-gray-200 text-xs text-gray-600">
+          <button 
+            @click="changeFontSize(-1)" 
+            class="px-2 py-1 hover:bg-white hover:text-indigo-600 rounded transition-colors text-xs font-bold"
+            title="缩小字体"
+          >
+            A-
+          </button>
+          <span class="px-1 font-mono text-[11px] min-w-[28px] text-center">{{ fontSize }}px</span>
+          <button 
+            @click="changeFontSize(1)" 
+            class="px-2 py-1 hover:bg-white hover:text-indigo-600 rounded transition-colors text-xs font-bold"
+            title="放大字体"
+          >
+            A+
+          </button>
+        </div>
+
+        <!-- Export Log -->
+        <el-tooltip content="导出当前会话日志" placement="top">
+          <el-button size="default" :icon="Download" @click="exportTerminalLog" class="!rounded-lg" />
+        </el-tooltip>
 
         <!-- Clear Screen -->
         <el-tooltip content="清空终端屏幕 (Ctrl+L)" placement="top">
@@ -66,15 +100,17 @@
       ref="fullscreenContainer"
       class="flex-1 min-h-0 bg-[#18181b] rounded-xl shadow-lg border border-gray-800 flex flex-col overflow-hidden transition-all duration-200"
       :class="isFullScreen ? 'fixed inset-0 z-50 rounded-none border-none' : ''"
+      @contextmenu.prevent="handleContextMenu"
     >
       <!-- Tabs Bar & Status -->
       <div class="bg-[#121215] px-3 pt-2 flex items-center justify-between border-b border-gray-800 select-none">
         <!-- Tabs List -->
-        <div class="flex items-center gap-1.5 overflow-x-auto no-scrollbar max-w-[70%]">
+        <div class="flex items-center gap-1.5 overflow-x-auto no-scrollbar max-w-[65%]">
           <div
             v-for="tab in tabs"
             :key="tab.id"
             @click="activeTabId = tab.id"
+            @dblclick="startRenameTab(tab)"
             class="group relative flex items-center gap-2 px-3 py-1.5 rounded-t-lg text-xs font-mono transition-all cursor-pointer border-t border-x"
             :class="activeTabId === tab.id 
               ? 'bg-[#18181b] text-gray-100 border-gray-700 shadow-sm font-semibold' 
@@ -82,7 +118,7 @@
           >
             <!-- Status Dot -->
             <span 
-              class="w-2 h-2 rounded-full inline-block"
+              class="w-2 h-2 rounded-full inline-block shrink-0"
               :class="{
                 'bg-emerald-500 shadow-sm shadow-emerald-500/50 animate-pulse': tab.status === 'connected',
                 'bg-amber-500 animate-ping': tab.status === 'connecting',
@@ -90,14 +126,25 @@
               }"
             />
             
-            <!-- Tab Title -->
-            <span class="truncate max-w-[120px]">{{ tab.title }}</span>
+            <!-- Tab Title / Edit Input -->
+            <input 
+              v-if="editingTabId === tab.id"
+              v-model="editingTitle"
+              @blur="saveRenameTab(tab)"
+              @keydown.enter.prevent="saveRenameTab(tab)"
+              @keydown.esc.prevent="cancelRenameTab"
+              @click.stop
+              ref="renameInputRef"
+              class="bg-gray-800 text-white px-1 py-0.5 rounded text-xs outline-none border border-indigo-500 w-24"
+            />
+            <span v-else class="truncate max-w-[120px]" :title="tab.title + ' (双击可重命名)'">{{ tab.title }}</span>
 
             <!-- Close Tab Button -->
             <span 
               v-if="tabs.length > 1"
               @click.stop="closeTab(tab.id)"
-              class="opacity-0 group-hover:opacity-100 hover:bg-gray-700 rounded p-0.5 text-gray-400 hover:text-white transition-all ml-1"
+              class="opacity-0 group-hover:opacity-100 hover:bg-gray-700 rounded p-0.5 text-gray-400 hover:text-white transition-all ml-1 shrink-0"
+              title="关闭标签页"
             >
               <X :size="12" />
             </span>
@@ -106,7 +153,7 @@
           <!-- Add Tab Quick Button -->
           <button 
             @click="createNewTab()"
-            class="px-2 py-1 rounded text-gray-400 hover:text-white hover:bg-gray-800 text-xs transition-colors"
+            class="px-2 py-1 rounded text-gray-400 hover:text-white hover:bg-gray-800 text-xs transition-colors shrink-0"
             title="新建终端标签"
           >
             <Plus :size="14" />
@@ -115,7 +162,7 @@
 
         <!-- Right: Active Tab Settings & Status Indicator -->
         <div class="flex items-center gap-3 py-1.5 text-xs text-gray-400 font-mono">
-          <!-- Shell Type Selector for Active Tab -->
+          <!-- Shell Type Selector -->
           <div class="flex items-center gap-1 bg-[#1e1e24] px-2 py-0.5 rounded border border-gray-700">
             <span class="text-gray-500 text-[11px]">Shell:</span>
             <select 
@@ -141,6 +188,11 @@
               <option value="GBK" class="bg-[#1e1e24] text-gray-200">GBK</option>
               <option value="GB2312" class="bg-[#1e1e24] text-gray-200">GB2312</option>
             </select>
+          </div>
+
+          <!-- Dimension Badge (Cols x Rows) -->
+          <div class="hidden sm:block text-[11px] text-gray-500 bg-[#1e1e24] px-2 py-0.5 rounded border border-gray-700/60">
+            {{ currentTab?.cols || 80 }}×{{ currentTab?.rows || 24 }}
           </div>
 
           <!-- Connection Status Pill -->
@@ -169,6 +221,86 @@
         />
       </div>
     </div>
+
+    <!-- Right-click Context Menu -->
+    <div 
+      v-if="contextMenu.visible"
+      :style="{ left: `${contextMenu.x}px`, top: `${contextMenu.y}px` }"
+      class="fixed z-50 bg-[#1e1e24] border border-gray-700 rounded-lg shadow-2xl py-1 text-xs text-gray-200 w-44 font-mono select-none"
+      @click.stop
+    >
+      <div @click="copySelection" class="flex items-center gap-2 px-3 py-2 hover:bg-indigo-600 hover:text-white cursor-pointer transition-colors">
+        <Copy :size="14" />
+        <span>复制选中内容</span>
+      </div>
+      <div @click="pasteFromClipboard" class="flex items-center gap-2 px-3 py-2 hover:bg-indigo-600 hover:text-white cursor-pointer transition-colors">
+        <Clipboard :size="14" />
+        <span>粘贴到终端</span>
+      </div>
+      <div class="h-px bg-gray-700 my-1"></div>
+      <div @click="clearActiveTerminal" class="flex items-center gap-2 px-3 py-2 hover:bg-indigo-600 hover:text-white cursor-pointer transition-colors">
+        <Eraser :size="14" />
+        <span>清空屏幕 (Clear)</span>
+      </div>
+      <div @click="reconnectActiveTerminal" class="flex items-center gap-2 px-3 py-2 hover:bg-indigo-600 hover:text-white cursor-pointer transition-colors">
+        <RotateCcw :size="14" />
+        <span>重新连接会话</span>
+      </div>
+      <div @click="exportTerminalLog" class="flex items-center gap-2 px-3 py-2 hover:bg-indigo-600 hover:text-white cursor-pointer transition-colors">
+        <Download :size="14" />
+        <span>导出终端日志</span>
+      </div>
+    </div>
+
+    <!-- Snippets Drawer -->
+    <el-drawer 
+      v-model="showSnippetDrawer" 
+      title="常用运维指令库" 
+      direction="rtl" 
+      size="380px"
+      :destroy-on-close="false"
+    >
+      <div class="space-y-4 text-xs">
+        <p class="text-gray-500">点击指令右侧按钮可直接填充或发送至当前活跃终端：</p>
+
+        <div v-for="group in snippetGroups" :key="group.category" class="space-y-2">
+          <div class="font-bold text-gray-800 flex items-center gap-1.5 border-b pb-1">
+            <span class="w-1.5 h-3 bg-indigo-500 rounded-full inline-block"></span>
+            <span>{{ group.category }}</span>
+          </div>
+          <div class="space-y-1.5">
+            <div 
+              v-for="item in group.items" 
+              :key="item.cmd"
+              class="p-2 bg-gray-50 hover:bg-indigo-50/60 rounded border border-gray-100 transition-colors group flex items-center justify-between gap-2"
+            >
+              <div class="min-w-0 flex-1">
+                <div class="font-semibold text-gray-700 text-[11px] truncate">{{ item.name }}</div>
+                <div class="font-mono text-gray-500 text-[10px] truncate mt-0.5" :title="item.cmd">{{ item.cmd }}</div>
+              </div>
+              <div class="flex items-center gap-1 shrink-0">
+                <el-tooltip content="仅填充到终端" placement="top">
+                  <button 
+                    @click="injectSnippet(item.cmd, false)"
+                    class="p-1 text-gray-400 hover:text-indigo-600 hover:bg-white rounded border border-transparent hover:border-gray-200 transition-all"
+                  >
+                    <ArrowRight :size="13" />
+                  </button>
+                </el-tooltip>
+                <el-tooltip content="填充并立即执行" placement="top">
+                  <button 
+                    @click="injectSnippet(item.cmd, true)"
+                    class="p-1 text-gray-400 hover:text-emerald-600 hover:bg-white rounded border border-transparent hover:border-gray-200 transition-all"
+                  >
+                    <Play :size="13" />
+                  </button>
+                </el-tooltip>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </el-drawer>
   </div>
 </template>
 
@@ -189,7 +321,13 @@ import {
   RotateCcw, 
   Maximize2, 
   Minimize2, 
-  FolderOpen
+  FolderOpen,
+  Copy,
+  Clipboard,
+  Download,
+  BookOpen,
+  ArrowRight,
+  Play
 } from 'lucide-vue-next'
 
 const route = useRoute()
@@ -219,6 +357,24 @@ let nextTabNumber = 1
 const tabs = ref([])
 const activeTabId = ref('')
 const tabDomRefs = new Map()
+
+// Font Size
+const fontSize = ref(13)
+
+// Snippet Drawer
+const showSnippetDrawer = ref(false)
+
+// Tab Rename
+const editingTabId = ref('')
+const editingTitle = ref('')
+const renameInputRef = ref(null)
+
+// Right Click Context Menu
+const contextMenu = reactive({
+  visible: false,
+  x: 0,
+  y: 0
+})
 
 const setTabDomRef = (el, id) => {
   if (el) {
@@ -255,6 +411,54 @@ const toggleFullScreen = () => {
   })
 }
 
+// Snippet presets
+const snippetGroups = computed(() => {
+  if (isWindows.value) {
+    return [
+      {
+        category: '系统排障 & 资源',
+        items: [
+          { name: '查看系统所有进程', cmd: 'Get-Process | Sort-Object CPU -Descending | Select-Object -First 15' },
+          { name: '查看磁盘空间使用', cmd: 'Get-PSDrive -PSProvider FileSystem' },
+          { name: '查看网络监听端口', cmd: 'netstat -ano | findstr LISTENING' },
+          { name: '测试网络连通性', cmd: 'Test-NetConnection -ComputerName 127.0.0.1 -Port 8080' }
+        ]
+      },
+      {
+        category: '应用 & 容器运维',
+        items: [
+          { name: '列出运行中 Docker 容器', cmd: 'docker ps -a --format "table {{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Ports}}"' },
+          { name: '检查所有运行中的 Java 进程', cmd: 'jps -l -v' },
+          { name: '快速测试 HTTP 服务', cmd: 'Invoke-WebRequest -Uri http://localhost:8080 -UseBasicParsing' }
+        ]
+      }
+    ]
+  } else {
+    return [
+      {
+        category: '系统负载 & 监控',
+        items: [
+          { name: '实时性能监控 (Top)', cmd: 'top' },
+          { name: '查看内存使用状况', cmd: 'free -h' },
+          { name: '查看各挂载磁盘空间', cmd: 'df -h' },
+          { name: '查看正在监听的端口', cmd: 'ss -tulpn' },
+          { name: '查看系统最近日志', cmd: 'journalctl -xe -n 50' }
+        ]
+      },
+      {
+        category: 'Nginx & Docker 运维',
+        items: [
+          { name: '测试 Nginx 配置文件语法', cmd: 'nginx -t' },
+          { name: '平滑重载 Nginx 服务', cmd: 'nginx -s reload' },
+          { name: '查看当前 Docker 容器', cmd: 'docker ps --format "table {{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Ports}}"' },
+          { name: '查看 Docker 资源占用 (即时)', cmd: 'docker stats --no-stream' },
+          { name: '检查所有 Java 进程', cmd: 'ps aux | grep java' }
+        ]
+      }
+    ]
+  }
+})
+
 // Fetch Terminal System Info
 const fetchTerminalInfo = async () => {
   try {
@@ -271,6 +475,24 @@ const fetchTerminalInfo = async () => {
   } catch (e) {
     console.error('Failed to get terminal info:', e)
   }
+}
+
+// Send resize event to backend PTY
+const sendResize = (tab) => {
+  if (!tab || !tab.xterm || !tab.socket || tab.socket.readyState !== WebSocket.OPEN) return
+  const cols = tab.xterm.cols
+  const rows = tab.xterm.rows
+  if (!cols || !rows || cols <= 0 || rows <= 0) return
+  tab.cols = cols
+  tab.rows = rows
+  try {
+    // 发送标准 JSON 控制帧（前后端原生支持，绝不会漏入终端 stdin 被回显）
+    tab.socket.send(JSON.stringify({
+      type: 'resize',
+      cols: cols,
+      rows: rows
+    }))
+  } catch (ignored) {}
 }
 
 // Create New Terminal Tab
@@ -291,164 +513,29 @@ const createNewTab = async (customConfig = {}) => {
     dir: initialDir,
     charset: charset,
     status: 'connecting',
+    cols: 80,
+    rows: 24,
     xterm: null,
     fitAddon: null,
     socket: null,
     resizeObserver: null,
-    // Line buffer state
-    inputBuffer: '',
-    cursorPos: 0,
-    history: [],
-    historyIndex: -1,
-    // Tab In-Place cycling state
-    completionState: {
-      active: false,
-      tokenStartIndex: 0,
-      beforeText: '',
-      afterText: '',
-      candidates: [],
-      currentIndex: 0
-    }
+    heartbeatTimer: null
   }
 
   tabs.value.push(newTab)
   activeTabId.value = tabId
 
   await nextTick()
+  // 确保等宽字体已就绪，防止字符度量不准导致计算的 cols/rows 偏小或偏大
+  if (document.fonts && document.fonts.ready) {
+    try {
+      await document.fonts.ready
+    } catch (ignored) {}
+  }
   initTerminalInstance(newTab)
 }
 
-// Calculate terminal display width for a character (handles ASCII, CJK wide chars, emojis)
-const getCharWidth = (char) => {
-  const code = char.codePointAt(0)
-  if (code < 32 || (code >= 0x7f && code < 0xa0)) {
-    return 0
-  }
-  // CJK ranges & fullwidth forms
-  if (
-    (code >= 0x1100 && code <= 0x115f) ||
-    (code >= 0x2e80 && code <= 0xa4cf && code !== 0x303f) ||
-    (code >= 0xac00 && code <= 0xd7a3) ||
-    (code >= 0xf900 && code <= 0xfaff) ||
-    (code >= 0xfe10 && code <= 0xfe19) ||
-    (code >= 0xfe30 && code <= 0xfe6f) ||
-    (code >= 0xff00 && code <= 0xff60) ||
-    (code >= 0xffe0 && code <= 0xffe6) ||
-    (code >= 0x20000 && code <= 0x2fffd) ||
-    (code >= 0x30000 && code <= 0x3fffd)
-  ) {
-    return 2
-  }
-  // Emoji ranges
-  if (
-    (code >= 0x1f300 && code <= 0x1f64f) ||
-    (code >= 0x1f680 && code <= 0x1f6ff) ||
-    (code >= 0x2600 && code <= 0x26ff) ||
-    (code >= 0x2700 && code <= 0x27bf)
-  ) {
-    return 2
-  }
-  return 1
-}
-
-// Calculate terminal display width for a string
-const getStringWidth = (str) => {
-  if (!str) return 0
-  let width = 0
-  for (const char of str) {
-    width += getCharWidth(char)
-  }
-  return width
-}
-
-// Replace current input on screen cleanly with a new buffer and cursor position
-const redrawInput = (tab, newBuffer, newCursorPos) => {
-  const xterm = tab.xterm
-  if (!xterm) return
-
-  // Move cursor from current position back to start of input
-  const currentBefore = tab.inputBuffer.slice(0, tab.cursorPos)
-  const currentBeforeWidth = getStringWidth(currentBefore)
-  let cmd = ''
-  if (currentBeforeWidth > 0) {
-    cmd += '\b'.repeat(currentBeforeWidth)
-  }
-  // Clear from cursor to end of line
-  cmd += '\x1b[K'
-  // Write new buffer content
-  cmd += newBuffer
-  xterm.write(cmd)
-
-  // Move cursor back if newCursorPos is before end of newBuffer
-  const newAfter = newBuffer.slice(newCursorPos)
-  const newAfterWidth = getStringWidth(newAfter)
-  if (newAfterWidth > 0) {
-    xterm.write('\b'.repeat(newAfterWidth))
-  }
-
-  tab.inputBuffer = newBuffer
-  tab.cursorPos = newCursorPos
-}
-
-// Execute command from input buffer
-const executeCommand = (tab, cmdToSend) => {
-  const xterm = tab.xterm
-  if (cmdToSend.trim().length > 0) {
-    if (tab.history.length === 0 || tab.history[tab.history.length - 1] !== cmdToSend) {
-      tab.history.push(cmdToSend)
-      if (tab.history.length > 200) tab.history.shift()
-    }
-  }
-  tab.historyIndex = -1
-  tab.inputBuffer = ''
-  tab.cursorPos = 0
-  if (xterm) {
-    xterm.write('\r\n')
-  }
-  if (tab.socket && tab.socket.readyState === WebSocket.OPEN) {
-    tab.socket.send(cmdToSend + '\n')
-  }
-}
-
-// Handle multi-line pasted text or command batch
-const handleMultiLineInput = (tab, text) => {
-  const xterm = tab.xterm
-  if (!xterm) return
-
-  const normalized = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
-  const lines = normalized.split('\n')
-
-  const before = tab.inputBuffer.slice(0, tab.cursorPos)
-  const after = tab.inputBuffer.slice(tab.cursorPos)
-
-  // Line 0 merges with what was before the cursor
-  const firstLine = before + lines[0]
-  xterm.write(lines[0])
-  executeCommand(tab, firstLine)
-
-  // Intermediate lines execute directly
-  for (let i = 1; i < lines.length - 1; i++) {
-    const line = lines[i]
-    xterm.write(line)
-    executeCommand(tab, line)
-  }
-
-  // Last line
-  const lastLine = lines[lines.length - 1]
-  if (lastLine.length > 0 || after.length > 0) {
-    const finalBuffer = lastLine + after
-    const finalCursorPos = lastLine.length
-    tab.inputBuffer = finalBuffer
-    tab.cursorPos = finalCursorPos
-    xterm.write(finalBuffer)
-    const afterWidth = getStringWidth(after)
-    if (afterWidth > 0) {
-      xterm.write('\b'.repeat(afterWidth))
-    }
-  }
-}
-
-// Initialize Xterm and WebSocket for a Tab
+// Initialize Xterm Instance with Native PTY streaming
 const initTerminalInstance = (tab) => {
   const container = tabDomRefs.get(tab.id)
   if (!container) return
@@ -457,7 +544,7 @@ const initTerminalInstance = (tab) => {
   const xterm = new Xterm({
     cursorBlink: true,
     cursorStyle: 'bar',
-    fontSize: 13,
+    fontSize: fontSize.value,
     fontFamily: 'Consolas, Monaco, "Courier New", "Fira Code", monospace',
     lineHeight: 1.2,
     theme: {
@@ -483,7 +570,8 @@ const initTerminalInstance = (tab) => {
       brightCyan: '#22d3ee',
       brightWhite: '#ffffff'
     },
-    convertEol: true,
+    convertEol: false, // 严禁二次转换 \n 为 \r\n，避免真实 PTY 阶梯状错位与 vim 画面破坏
+    windowsMode: isWindows.value,
     scrollback: 5000,
     allowProposedApi: true
   })
@@ -493,271 +581,74 @@ const initTerminalInstance = (tab) => {
   xterm.loadAddon(new WebLinksAddon())
 
   xterm.open(container)
-  fitAddon.fit()
+  try {
+    fitAddon.fit()
+  } catch (ignored) {}
 
   tab.xterm = xterm
   tab.fitAddon = fitAddon
+  tab.cols = xterm.cols || 80
+  tab.rows = xterm.rows || 24
 
   // 2. Setup ResizeObserver
   const resizeObserver = new ResizeObserver(() => {
     if (activeTabId.value === tab.id) {
       try {
         fitAddon.fit()
+        sendResize(tab)
       } catch (ignored) {}
     }
   })
   resizeObserver.observe(container)
   tab.resizeObserver = resizeObserver
 
-  // 3. Connect WebSocket
+  // 3. Setup Xterm Resize Listener
+  xterm.onResize(() => {
+    sendResize(tab)
+  })
+
+  // 4. Selection Copy on Select
+  xterm.onSelectionChange(() => {
+    const selection = xterm.getSelection()
+    if (selection && selection.length > 0) {
+      navigator.clipboard?.writeText(selection).catch(() => {})
+    }
+  })
+
+  // 5. 键盘快捷键拦截优化（Ctrl+V 粘贴 与 Ctrl+C 复制/中断）
+  xterm.attachCustomKeyEventHandler((event) => {
+    if (event.type !== 'keydown') return true
+
+    // Ctrl+V 或 Cmd+V (Mac) 安全粘贴
+    if ((event.ctrlKey || event.metaKey) && (event.key === 'v' || event.key === 'V') && !event.altKey) {
+      pasteFromClipboard(tab)
+      return false // 阻止浏览器原生粘贴行为，避免未受控的双重注入
+    }
+
+    // Ctrl+C：当有文本被选中时，优先执行复制到剪贴板，避免直接触发 SIGINT 中断前台任务
+    if ((event.ctrlKey || event.metaKey) && (event.key === 'c' || event.key === 'C') && !event.altKey) {
+      if (xterm.hasSelection()) {
+        copySelection()
+        return false
+      }
+    }
+
+    return true
+  })
+
+  // 6. Connect WebSocket with Safe Handshake
   connectWebSocket(tab)
 
-  // 4. Handle Terminal User Input -> Full Line Editor with Backspace/Delete/History/Paste support
+  // 7. Native PTY Data Stream Direct Pass-Through
+  // 所有按键、退格、方向键、Tab 键、Ctrl+C 全部原生送交 PTY
   xterm.onData((data) => {
-    if (!tab.socket || tab.socket.readyState !== WebSocket.OPEN) {
-      return
-    }
-
-    // 非 Tab 键输入时，退出 Tab 补全轮播状态
-    if (data !== '\t' && data !== '\x09') {
-      if (tab.completionState) {
-        tab.completionState.active = false
-      }
-    }
-
-    // A. 包含换行符（回车键或多行粘贴/带换行的单行粘贴）
-    if (data.includes('\r') || data.includes('\n')) {
-      const normalized = data.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
-      const lines = normalized.split('\n')
-      if (lines.length === 1 || (lines.length === 2 && lines[0] === '' && lines[1] === '')) {
-        // 单纯按下回车键
-        executeCommand(tab, tab.inputBuffer)
-        return
-      }
-      // 多行文本粘贴
-      handleMultiLineInput(tab, data)
-      return
-    }
-
-    // B. Backspace Key (\x7f or \x08 or ASCII 127) -> Accurately delete character before cursor
-    if (data === '\x7f' || data === '\x08') {
-      if (tab.cursorPos > 0) {
-        const before = tab.inputBuffer.slice(0, tab.cursorPos)
-        const after = tab.inputBuffer.slice(tab.cursorPos)
-
-        // 处理代理对（如 Emoji / 拓展 Unicode）
-        let delLen = 1
-        if (tab.cursorPos >= 2) {
-          const code = tab.inputBuffer.charCodeAt(tab.cursorPos - 1)
-          const prevCode = tab.inputBuffer.charCodeAt(tab.cursorPos - 2)
-          if (code >= 0xDC00 && code <= 0xDFFF && prevCode >= 0xD800 && prevCode <= 0xDBFF) {
-            delLen = 2
-          }
-        }
-
-        const deletedChar = before.slice(-delLen)
-        const newBefore = before.slice(0, -delLen)
-        const charWidth = getStringWidth(deletedChar)
-        const afterWidth = getStringWidth(after)
-
-        tab.inputBuffer = newBefore + after
-        tab.cursorPos -= delLen
-
-        // 视觉擦除：光标左移对应字宽 -> 清除右侧到行尾 -> 重绘 after 内容 -> 光标移回正确插入点
-        let redraw = '\b'.repeat(charWidth) + '\x1b[K' + after
-        if (afterWidth > 0) {
-          redraw += '\b'.repeat(afterWidth)
-        }
-        xterm.write(redraw)
-      }
-      return
-    }
-
-    // C. Delete Key (\x1b[3~) -> Delete character at cursor
-    if (data === '\x1b[3~') {
-      if (tab.cursorPos < tab.inputBuffer.length) {
-        const before = tab.inputBuffer.slice(0, tab.cursorPos)
-        const after = tab.inputBuffer.slice(tab.cursorPos)
-
-        let delLen = 1
-        if (after.length >= 2) {
-          const code = after.charCodeAt(0)
-          const nextCode = after.charCodeAt(1)
-          if (code >= 0xD800 && code <= 0xDBFF && nextCode >= 0xDC00 && nextCode <= 0xDFFF) {
-            delLen = 2
-          }
-        }
-
-        const newAfter = after.slice(delLen)
-        const newAfterWidth = getStringWidth(newAfter)
-
-        tab.inputBuffer = before + newAfter
-
-        let redraw = '\x1b[K' + newAfter
-        if (newAfterWidth > 0) {
-          redraw += '\b'.repeat(newAfterWidth)
-        }
-        xterm.write(redraw)
-      }
-      return
-    }
-
-    // Tab Key (\t or \x09) -> Intelligent Command & Path Autocompletion
-    if (data === '\t' || data === '\x09') {
-      handleTabCompletion(tab)
-      return
-    }
-
-    // D. Left Arrow (\x1b[D)
-    if (data === '\x1b[D') {
-      if (tab.cursorPos > 0) {
-        const before = tab.inputBuffer.slice(0, tab.cursorPos)
-        let step = 1
-        if (tab.cursorPos >= 2) {
-          const code = tab.inputBuffer.charCodeAt(tab.cursorPos - 1)
-          const prevCode = tab.inputBuffer.charCodeAt(tab.cursorPos - 2)
-          if (code >= 0xDC00 && code <= 0xDFFF && prevCode >= 0xD800 && prevCode <= 0xDBFF) {
-            step = 2
-          }
-        }
-        const prevChar = before.slice(-step)
-        const charWidth = getStringWidth(prevChar)
-        tab.cursorPos -= step
-        if (charWidth > 0) {
-          xterm.write('\b'.repeat(charWidth))
-        }
-      }
-      return
-    }
-
-    // E. Right Arrow (\x1b[C)
-    if (data === '\x1b[C') {
-      if (tab.cursorPos < tab.inputBuffer.length) {
-        const after = tab.inputBuffer.slice(tab.cursorPos)
-        let step = 1
-        if (after.length >= 2) {
-          const code = after.charCodeAt(0)
-          const nextCode = after.charCodeAt(1)
-          if (code >= 0xD800 && code <= 0xDBFF && nextCode >= 0xDC00 && nextCode <= 0xDFFF) {
-            step = 2
-          }
-        }
-        const nextChar = after.slice(0, step)
-        const charWidth = getStringWidth(nextChar)
-        tab.cursorPos += step
-        if (charWidth > 0) {
-          xterm.write('\x1b[' + charWidth + 'C')
-        }
-      }
-      return
-    }
-
-    // F. Home Key (\x1b[H or \x1b[1~ or \x1bOH)
-    if (data === '\x1b[H' || data === '\x1b[1~' || data === '\x1bOH') {
-      if (tab.cursorPos > 0) {
-        const before = tab.inputBuffer.slice(0, tab.cursorPos)
-        const width = getStringWidth(before)
-        if (width > 0) {
-          xterm.write('\b'.repeat(width))
-        }
-        tab.cursorPos = 0
-      }
-      return
-    }
-
-    // G. End Key (\x1b[F or \x1b[4~ or \x1bOF)
-    if (data === '\x1b[F' || data === '\x1b[4~' || data === '\x1bOF') {
-      if (tab.cursorPos < tab.inputBuffer.length) {
-        const after = tab.inputBuffer.slice(tab.cursorPos)
-        const width = getStringWidth(after)
-        if (width > 0) {
-          xterm.write('\x1b[' + width + 'C')
-        }
-        tab.cursorPos = tab.inputBuffer.length
-      }
-      return
-    }
-
-    // H. Up Arrow (\x1b[A) -> Previous command in history
-    if (data === '\x1b[A') {
-      if (tab.history.length > 0) {
-        if (tab.historyIndex === -1) {
-          tab.historyIndex = tab.history.length - 1
-        } else if (tab.historyIndex > 0) {
-          tab.historyIndex--
-        }
-        const prevCmd = tab.history[tab.historyIndex]
-        redrawInput(tab, prevCmd, prevCmd.length)
-      }
-      return
-    }
-
-    // I. Down Arrow (\x1b[B) -> Next command in history
-    if (data === '\x1b[B') {
-      if (tab.historyIndex !== -1) {
-        if (tab.historyIndex < tab.history.length - 1) {
-          tab.historyIndex++
-          const nextCmd = tab.history[tab.historyIndex]
-          redrawInput(tab, nextCmd, nextCmd.length)
-        } else {
-          tab.historyIndex = -1
-          redrawInput(tab, '', 0)
-        }
-      }
-      return
-    }
-
-    // J. Ctrl+C (\x03)
-    if (data === '\x03') {
-      xterm.write('^C\r\n')
-      tab.socket.send('\x03\r\n')
-      tab.inputBuffer = ''
-      tab.cursorPos = 0
-      tab.historyIndex = -1
-      return
-    }
-
-    // K. Ctrl+L (\x0c) -> Clear Screen
-    if (data === '\x0c') {
-      xterm.clear()
-      if (tab.inputBuffer) {
-        xterm.write(tab.inputBuffer)
-        const after = tab.inputBuffer.slice(tab.cursorPos)
-        const afterWidth = getStringWidth(after)
-        if (afterWidth > 0) {
-          xterm.write('\b'.repeat(afterWidth))
-        }
-      }
-      return
-    }
-
-    // L. Ignore other escape sequences
-    if (data.startsWith('\x1b')) {
-      return
-    }
-
-    // M. Printable Characters / Chinese / Single-line Paste Text
-    const cleanData = data.replace(/[\x00-\x08\x0b-\x1a\x1c-\x1f\x7f]/g, '')
-    if (cleanData.length === 0) return
-
-    const before = tab.inputBuffer.slice(0, tab.cursorPos)
-    const after = tab.inputBuffer.slice(tab.cursorPos)
-    tab.inputBuffer = before + cleanData + after
-    tab.cursorPos += cleanData.length
-
-    if (after.length === 0) {
-      xterm.write(cleanData)
-    } else {
-      const afterWidth = getStringWidth(after)
-      xterm.write('\x1b[K' + cleanData + after)
-      if (afterWidth > 0) {
-        xterm.write('\b'.repeat(afterWidth))
-      }
+    if (tab.socket && tab.socket.readyState === WebSocket.OPEN) {
+      tab.socket.send(data)
     }
   })
 }
 
-// Connect WebSocket for Tab
+// Connect WebSocket for Tab (with Sa-Token Authentication & initial cols/rows)
 const connectWebSocket = (tab) => {
   if (tab.socket) {
     try {
@@ -770,10 +661,15 @@ const connectWebSocket = (tab) => {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
   const host = window.location.host
   const prefix = (import.meta.env.VITE_APP_API_PREFIX || '/api').replace(/\/$/, '')
+  const token = localStorage.getItem('satoken') || ''
+
   const query = new URLSearchParams({
     shell: tab.shell || '',
     dir: tab.dir || '',
-    charset: tab.charset || ''
+    charset: tab.charset || '',
+    cols: String(tab.xterm ? tab.xterm.cols : 80),
+    rows: String(tab.xterm ? tab.xterm.rows : 24),
+    satoken: token
   }).toString()
 
   const url = `${protocol}//${host}${prefix}/ws/terminal?${query}`
@@ -784,18 +680,27 @@ const connectWebSocket = (tab) => {
     if (tab.xterm) {
       tab.xterm.focus()
     }
-    // 每 30 秒发送心跳，防止 Nginx 代理 60 秒超时断开
+    // 延迟一帧确保 DOM 容器尺寸绝对稳定后同步尺寸
+    requestAnimationFrame(() => {
+      if (tab.fitAddon) {
+        try {
+          tab.fitAddon.fit()
+        } catch (ignored) {}
+      }
+      sendResize(tab)
+    })
+
+    // 心跳维持（每 30 秒，使用标准 JSON）
     tab.heartbeatTimer = setInterval(() => {
       if (socket.readyState === WebSocket.OPEN) {
-        socket.send('{"type":"ping"}')
+        socket.send(JSON.stringify({ type: 'ping' }))
       }
     }, 30000)
   }
 
   socket.onmessage = (event) => {
     if (tab.xterm) {
-      // 过滤心跳 pong 响应，不显示到终端
-      if (event.data === '{"type":"pong"}') return
+      if (event.data === '{"type":"pong"}' || event.data.includes('"type":"pong"')) return
       tab.xterm.write(event.data)
     }
   }
@@ -807,7 +712,7 @@ const connectWebSocket = (tab) => {
       tab.heartbeatTimer = null
     }
     if (tab.xterm) {
-      tab.xterm.write('\r\n\u001b[31m[错误] WebSocket 连接发生错误\u001b[0m\r\n')
+      tab.xterm.write('\r\n\u001b[31m[错误] WebSocket 连接异常或鉴权失败\u001b[0m\r\n')
     }
   }
 
@@ -818,69 +723,140 @@ const connectWebSocket = (tab) => {
       tab.heartbeatTimer = null
     }
     if (tab.xterm) {
-      tab.xterm.write(`\r\n\u001b[33m[连接断开] 代码: ${event.code} 原因: ${event.reason || '会话已终止'}\u001b[0m\r\n`)
+      if (event.code === 4401 || event.code === 1008) {
+        tab.xterm.write('\r\n\u001b[31m[权限拒绝] 未检测到有效登录状态，连接已中断\u001b[0m\r\n')
+      } else {
+        tab.xterm.write(`\r\n\u001b[33m[连接断开] 代码: ${event.code} 原因: ${event.reason || '会话已终止'}\u001b[0m\r\n`)
+      }
     }
   }
 
   tab.socket = socket
 }
 
-// Handle Tab Autocompletion (In-Place native shell style cycling)
-const handleTabCompletion = async (tab) => {
-  const xterm = tab.xterm
-  if (!xterm) return
+// Adjust font size
+const changeFontSize = (delta) => {
+  const newSize = Math.max(12, Math.min(22, fontSize.value + delta))
+  if (newSize === fontSize.value) return
+  fontSize.value = newSize
+  tabs.value.forEach(tab => {
+    if (tab.xterm) {
+      tab.xterm.options.fontSize = newSize
+      if (tab.fitAddon) {
+        try {
+          tab.fitAddon.fit()
+          sendResize(tab)
+        } catch (ignored) {}
+      }
+    }
+  })
+}
 
-  // 1. 如果当前已经处于 Tab 补全轮播状态，连续按 Tab 直接轮流替换下一个候选项
-  if (tab.completionState && tab.completionState.active && tab.completionState.candidates.length > 0) {
-    const candidates = tab.completionState.candidates
-    tab.completionState.currentIndex = (tab.completionState.currentIndex + 1) % candidates.length
-    const match = candidates[tab.completionState.currentIndex]
+// Context Menu Handling
+const handleContextMenu = (e) => {
+  contextMenu.x = e.clientX
+  contextMenu.y = e.clientY
+  contextMenu.visible = true
+}
 
-    const newBuffer = tab.completionState.beforeText + match + tab.completionState.afterText
-    const newCursorPos = tab.completionState.beforeText.length + match.length
-    redrawInput(tab, newBuffer, newCursorPos)
+const closeContextMenu = () => {
+  contextMenu.visible = false
+}
+
+const copySelection = () => {
+  const tab = currentTab.value
+  if (tab && tab.xterm) {
+    const text = tab.xterm.getSelection()
+    if (text) {
+      navigator.clipboard.writeText(text).then(() => {
+        ElMessage.success('已复制到剪贴板')
+      }).catch(() => {})
+    } else {
+      ElMessage.info('未选中文本')
+    }
+  }
+  closeContextMenu()
+}
+
+const pasteFromClipboard = async (targetTab = null) => {
+  const tab = targetTab || currentTab.value
+  if (!tab || !tab.xterm) {
+    closeContextMenu()
     return
   }
 
-  // 2. 首次按下 Tab 键：请求后端匹配候选列表
-  const currentLine = tab.inputBuffer
-  const cursorPos = tab.cursorPos
-
   try {
-    const res = await api.terminal.complete({
-      dir: tab.dir,
-      line: currentLine,
-      cursorPos: cursorPos
-    })
-
-    if (res.code === 200 && res.data) {
-      const { lastToken, tokenStartIndex, candidates } = res.data
-      if (!candidates || candidates.length === 0) {
-        return
-      }
-
-      const startIdx = typeof tokenStartIndex === 'number' ? tokenStartIndex : (cursorPos - lastToken.length)
-      const before = currentLine.slice(0, startIdx)
-      const after = currentLine.slice(cursorPos)
-
-      // 记录当前补全状态以便后续连续按 Tab 时原地轮播
-      tab.completionState = {
-        active: true,
-        tokenStartIndex: startIdx,
-        beforeText: before,
-        afterText: after,
-        candidates: candidates,
-        currentIndex: 0
-      }
-
-      const match = candidates[0]
-      const newBuffer = before + match + after
-      const newCursorPos = before.length + match.length
-      redrawInput(tab, newBuffer, newCursorPos)
+    const text = await navigator.clipboard.readText()
+    if (text) {
+      // 使用 xterm 原生 paste API 派发
+      // 内部会自动处理 Bracketed Paste Mode 转义包裹，并统一将 CRLF 转化为标准终端换行符
+      tab.xterm.paste(text)
     }
   } catch (e) {
-    console.error('Tab completion error:', e)
+    ElMessage.warning('未能获取剪贴板内容，请直接在终端中使用 Ctrl+V 快捷键')
   }
+  closeContextMenu()
+}
+
+// Export terminal log as file
+const exportTerminalLog = () => {
+  const tab = currentTab.value
+  if (!tab || !tab.xterm) return
+  
+  let content = ''
+  const buffer = tab.xterm.buffer.active
+  for (let i = 0; i < buffer.length; i++) {
+    const line = buffer.getLine(i)
+    if (line) {
+      content += line.translateToString(true) + '\n'
+    }
+  }
+
+  const blob = new Blob([content], { type: 'text/plain;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `terminal_${tab.title.replace(/[\s#]/g, '_')}_${new Date().getTime()}.log`
+  a.click()
+  URL.revokeObjectURL(a)
+  ElMessage.success('终端日志已导出')
+  closeContextMenu()
+}
+
+// Inject command snippet
+const injectSnippet = (cmd, autoExecute = false) => {
+  const tab = currentTab.value
+  if (!tab || !tab.socket || tab.socket.readyState !== WebSocket.OPEN) {
+    ElMessage.warning('当前终端尚未就绪')
+    return
+  }
+  const textToSend = autoExecute ? (cmd + '\n') : cmd
+  tab.socket.send(textToSend)
+  if (tab.xterm) {
+    tab.xterm.focus()
+  }
+  ElMessage.success(autoExecute ? '命令已执行' : '命令已填充至终端')
+}
+
+// Tab rename
+const startRenameTab = (tab) => {
+  editingTabId.value = tab.id
+  editingTitle.value = tab.title
+  nextTick(() => {
+    renameInputRef.value?.focus()
+    renameInputRef.value?.select()
+  })
+}
+
+const saveRenameTab = (tab) => {
+  if (editingTitle.value && editingTitle.value.trim().length > 0) {
+    tab.title = editingTitle.value.trim()
+  }
+  editingTabId.value = ''
+}
+
+const cancelRenameTab = () => {
+  editingTabId.value = ''
 }
 
 // Fit Active Terminal
@@ -889,6 +865,7 @@ const fitActiveTerminal = () => {
   if (tab && tab.fitAddon) {
     try {
       tab.fitAddon.fit()
+      sendResize(tab)
     } catch (ignored) {}
   }
 }
@@ -898,10 +875,9 @@ const clearActiveTerminal = () => {
   const tab = currentTab.value
   if (tab && tab.xterm) {
     tab.xterm.clear()
-    tab.inputBuffer = ''
-    tab.cursorPos = 0
     tab.xterm.focus()
   }
+  closeContextMenu()
 }
 
 // Reconnect Active Terminal
@@ -911,11 +887,9 @@ const reconnectActiveTerminal = () => {
     if (tab.xterm) {
       tab.xterm.clear()
     }
-    tab.inputBuffer = ''
-    tab.cursorPos = 0
-    tab.historyIndex = -1
     connectWebSocket(tab)
   }
+  closeContextMenu()
 }
 
 // Change Shell on Active Tab
@@ -948,7 +922,6 @@ const closeTab = (tabId) => {
   if (idx === -1) return
 
   const tabToClose = tabs.value[idx]
-  // Cleanup resources
   if (tabToClose.heartbeatTimer) {
     clearInterval(tabToClose.heartbeatTimer)
     tabToClose.heartbeatTimer = null
@@ -965,7 +938,6 @@ const closeTab = (tabId) => {
 
   tabs.value.splice(idx, 1)
 
-  // Switch active tab if closed active
   if (activeTabId.value === tabId && tabs.value.length > 0) {
     const newIdx = Math.max(0, idx - 1)
     activeTabId.value = tabs.value[newIdx].id
@@ -979,22 +951,28 @@ watch(activeTabId, () => {
     if (tab && tab.fitAddon && tab.xterm) {
       try {
         tab.fitAddon.fit()
+        sendResize(tab)
         tab.xterm.focus()
       } catch (ignored) {}
     }
   })
 })
 
-// Window Resize Event
 const handleWindowResize = () => {
   fitActiveTerminal()
+}
+
+const handleGlobalClick = () => {
+  if (contextMenu.visible) {
+    closeContextMenu()
+  }
 }
 
 onMounted(async () => {
   await fetchTerminalInfo()
   window.addEventListener('resize', handleWindowResize)
+  window.addEventListener('click', handleGlobalClick)
 
-  // Check URL query parameters (e.g. ?dir=...&shell=...)
   const queryDir = route.query.dir ? String(route.query.dir) : ''
   const queryShell = route.query.shell ? String(route.query.shell) : ''
 
@@ -1012,7 +990,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('resize', handleWindowResize)
-  // Cleanup all tabs
+  window.removeEventListener('click', handleGlobalClick)
   tabs.value.forEach(tab => {
     if (tab.heartbeatTimer) {
       clearInterval(tab.heartbeatTimer)

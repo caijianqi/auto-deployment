@@ -72,3 +72,9 @@ CREATE TABLE IF NOT EXISTS sys_resource (
     config_content TEXT,
     remark TEXT
 );
+
+-- 初始化默认管理员 (账号: admin, 默认密码: 123456)
+-- 仅当 sys_user 表中尚无任何用户时执行，后续重启即使改密或改名均不触发
+INSERT INTO sys_user (id, username, password, nickname)
+SELECT 1, 'admin', '$2a$10$7JB720yubVSZvUI0rEqK/.VqGOZTH.ulu33dHOiBE8ByOhJIrdAu2', 'Administrator'
+WHERE NOT EXISTS (SELECT 1 FROM sys_user);

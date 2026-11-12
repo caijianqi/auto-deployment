@@ -251,6 +251,17 @@
                 打开
               </el-button>
 
+              <!-- Open Terminal in Dir -->
+              <el-button 
+                v-if="row.isDir"
+                type="info" 
+                link 
+                size="small" 
+                @click.stop="openInTerminal(row.path)"
+              >
+                终端
+              </el-button>
+
               <!-- Download File -->
               <el-button 
                 v-if="!row.isDir"

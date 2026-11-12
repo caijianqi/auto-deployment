@@ -93,6 +93,11 @@ public class TerminalController {
             }
             pb.redirectErrorStream(true);
             Process p = pb.start();
+            boolean finished = p.waitFor(15, java.util.concurrent.TimeUnit.SECONDS);
+            if (!finished) {
+                p.destroyForcibly();
+                return SaResult.error("命令执行超时 (限制15秒)，已强行终止");
+            }
             String output = RuntimeUtil.getResult(p);
             return SaResult.data(output);
         } catch (Exception e) {
@@ -206,6 +211,9 @@ public class TerminalController {
                 File[] files = targetFolder.listFiles();
                 if (files != null) {
                     for (File f : files) {
+                        if (candidates.size() >= 50) {
+                            break;
+                        }
                         if (StrUtil.isBlank(searchPrefix) || f.getName().toLowerCase().startsWith(searchPrefix.toLowerCase())) {
                             String match = f.getName();
                             if (f.isDirectory()) {

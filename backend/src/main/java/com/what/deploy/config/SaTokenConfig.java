@@ -3,7 +3,6 @@ package com.what.deploy.config;
 import cn.dev33.satoken.interceptor.SaInterceptor;
 import cn.dev33.satoken.router.SaRouter;
 import cn.dev33.satoken.stp.StpUtil;
-import cn.dev33.satoken.util.SaResult;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.lang.NonNull;
 import org.springframework.web.servlet.config.annotation.InterceptorRegistry;
@@ -19,16 +18,9 @@ public class SaTokenConfig implements WebMvcConfigurer {
                 return;
             }
 
-            // 1. 系统初始化检查
-            if (!InitConfig.initialized) {
-                SaRouter.match("/api/**")
-                        .notMatch("/api/auth/status", "/api/auth/init")
-                        .back(SaResult.error("系统未初始化").set("code", 4016));
-            }
-
-            // 2. 登录状态检查
+            // 1. 登录状态检查：仅放行登录接口与 WebSocket，其余接口均需已登录
             SaRouter.match("/api/**")
-                    .notMatch("/api/auth/login", "/api/auth/status", "/api/auth/init", "/api/ws/**")
+                    .notMatch("/api/auth/login", "/api/ws/**")
                     .check(r -> StpUtil.checkLogin());
         })).addPathPatterns("/**").excludePathPatterns("/api/ws/**");
     }

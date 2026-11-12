@@ -1,6 +1,9 @@
 package com.what.deploy.config;
 
 import cn.hutool.core.util.StrUtil;
+import com.pty4j.PtyProcess;
+import com.pty4j.PtyProcessBuilder;
+import com.pty4j.WinSize;
 import com.what.deploy.util.OSUtil;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.lang.NonNull;
@@ -20,34 +23,33 @@ import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
- * Web 终端 WebSocket 处理器
- * 支持在 Windows (PowerShell / CMD) 以及 Linux (Bash / Sh) 下进行实时命令交互
+ * Web 终端 WebSocket 处理器（基于 pty4j 原生伪终端）
+ * 支持在 Windows (ConPTY / PowerShell / CMD) 以及 Linux (PTS / Bash / Sh) 下进行原生终端交互
  */
 @Slf4j
 @Component
 public class TerminalWebSocketHandler extends TextWebSocketHandler {
 
     private final Map<String, TerminalProcessContext> sessions = new ConcurrentHashMap<>();
-    private final ExecutorService executorService = Executors.newCachedThreadPool();
 
     public static class TerminalProcessContext {
-        private final Process process;
+        private final PtyProcess process;
         private final OutputStream outputStream;
         private final Charset charset;
         private final Thread readerThread;
 
-        public TerminalProcessContext(Process process, OutputStream outputStream, Charset charset, Thread readerThread) {
+        public TerminalProcessContext(PtyProcess process, OutputStream outputStream, Charset charset, Thread readerThread) {
             this.process = process;
             this.outputStream = outputStream;
             this.charset = charset;
             this.readerThread = readerThread;
         }
 
-        public Process getProcess() {
+        public PtyProcess getProcess() {
             return process;
         }
 
@@ -59,6 +61,18 @@ public class TerminalWebSocketHandler extends TextWebSocketHandler {
             return charset;
         }
 
+        public void resize(int cols, int rows) {
+            if (process != null && process.isAlive()) {
+                try {
+                    int safeCols = Math.max(10, Math.min(cols, 1000));
+                    int safeRows = Math.max(3, Math.min(rows, 500));
+                    process.setWinSize(new WinSize(safeCols, safeRows));
+                } catch (Exception e) {
+                    log.warn("Failed to resize pty window size to {}x{}: {}", cols, rows, e.getMessage());
+                }
+            }
+        }
+
         public void destroy() {
             try {
                 if (outputStream != null) {
@@ -67,12 +81,10 @@ public class TerminalWebSocketHandler extends TextWebSocketHandler {
             } catch (Exception ignored) {
             }
             if (process != null && process.isAlive()) {
-                // 先销毁所有子进程（setsid 会话中的进程树）
                 try {
-                    process.descendants().forEach(ProcessHandle::destroyForcibly);
+                    process.destroyForcibly();
                 } catch (Exception ignored) {
                 }
-                process.destroyForcibly();
             }
             if (readerThread != null && readerThread.isAlive()) {
                 readerThread.interrupt();
@@ -82,12 +94,22 @@ public class TerminalWebSocketHandler extends TextWebSocketHandler {
 
     @Override
     public void afterConnectionEstablished(@NonNull WebSocketSession session) throws Exception {
-        log.info("Terminal WebSocket connection established: session={}", session.getId());
+        // 双重安全校验：确认握手阶段已注入合法登录 ID
+        Object loginId = session.getAttributes().get("loginId");
+        if (loginId == null) {
+            log.warn("Terminal connection rejected: missing authenticated loginId, session={}", session.getId());
+            session.close(new CloseStatus(4401, "Unauthorized"));
+            return;
+        }
+
+        log.info("Terminal WebSocket connection established: session={}, user={}", session.getId(), loginId);
 
         Map<String, String> queryParams = parseQueryParams(session.getUri());
         String shell = queryParams.getOrDefault("shell", "");
         String dir = queryParams.getOrDefault("dir", "");
         String charsetParam = queryParams.getOrDefault("charset", "");
+        int initialCols = parsePositiveInt(queryParams.get("cols"), 80);
+        int initialRows = parsePositiveInt(queryParams.get("rows"), 24);
 
         // 确定工作目录（默认使用用户家目录 ~）
         String userHome = System.getProperty("user.home");
@@ -111,10 +133,9 @@ public class TerminalWebSocketHandler extends TextWebSocketHandler {
         // 确定 Shell 命令与编码
         List<String> command = new ArrayList<>();
         Charset charset;
-        String shellName; // 记录实际 shell 名称（用于欢迎信息展示）
+        String shellName;
 
         if (OSUtil.isWindows()) {
-            // Windows 编码策略：中文 Windows CMD/PowerShell 默认是 GBK，若指定则依参数
             if (StrUtil.isNotBlank(charsetParam)) {
                 try {
                     charset = Charset.forName(charsetParam);
@@ -132,14 +153,11 @@ public class TerminalWebSocketHandler extends TextWebSocketHandler {
             if ("cmd".equalsIgnoreCase(shell) || "cmd.exe".equalsIgnoreCase(shell)) {
                 command.add("cmd.exe");
             } else {
-                // 默认使用 powershell.exe
                 command.add("powershell.exe");
                 command.add("-NoLogo");
-                command.add("-NoExit");
             }
             shellName = command.get(0);
         } else {
-            // Linux / Unix 默认 UTF-8
             if (StrUtil.isNotBlank(charsetParam)) {
                 try {
                     charset = Charset.forName(charsetParam);
@@ -157,8 +175,6 @@ public class TerminalWebSocketHandler extends TextWebSocketHandler {
                 File bash = new File("/bin/bash");
                 if (bash.exists()) {
                     command.add("/bin/bash");
-                    command.add("--norc");
-                    command.add("--noprofile");
                     command.add("-i");
                 } else {
                     command.add("/bin/sh");
@@ -166,42 +182,35 @@ public class TerminalWebSocketHandler extends TextWebSocketHandler {
                 }
             }
             shellName = command.get(0);
-
-            // 使用 setsid 创建新会话，使子进程脱离父进程的控制终端
-            // 防止 -i 模式下子进程的 SIGTTIN/SIGTTOU 信号传播到 Java 父进程导致 Stopped
-            for (String setsidPath : new String[]{"/usr/bin/setsid", "/bin/setsid"}) {
-                if (new File(setsidPath).exists()) {
-                    command.add(0, setsidPath);
-                    break;
-                }
-            }
         }
 
-        // 启动进程
-        ProcessBuilder pb = new ProcessBuilder(command);
-        if (workDir.exists() && workDir.isDirectory()) {
-            pb.directory(workDir);
-        }
-
-        Map<String, String> env = pb.environment();
+        // 构建 PTY 环境变量
+        Map<String, String> env = new HashMap<>(System.getenv());
         env.put("TERM", "xterm-256color");
+        env.put("COLORTERM", "truecolor");
         if (!OSUtil.isWindows()) {
-            // 使用 C.UTF-8 而非 zh_CN.UTF-8，避免服务器未安装中文 locale 时报错
             env.put("LANG", "C.UTF-8");
             env.put("LC_ALL", "C.UTF-8");
-            // --norc --noprofile 不会加载 .bashrc，需要手动设置 PS1 提示符
-            // 格式: user@host:workdir$ (家目录显示为~)
-            env.put("PS1", "\\" + "u@\\h:\\w\\$ ");
         }
-        pb.redirectErrorStream(true);
 
-        Process process;
+        PtyProcess process;
         try {
-            process = pb.start();
+            PtyProcessBuilder ppb = new PtyProcessBuilder()
+                    .setCommand(command.toArray(new String[0]))
+                    .setEnvironment(env)
+                    .setInitialColumns(initialCols)
+                    .setInitialRows(initialRows)
+                    .setConsole(false);
+
+            if (workDir.exists() && workDir.isDirectory()) {
+                ppb.setDirectory(workDir.getAbsolutePath());
+            }
+
+            process = ppb.start();
         } catch (Exception e) {
-            log.error("Failed to start terminal process: command={}", command, e);
-            session.sendMessage(new TextMessage("\u001b[31m[错误] 启动终端进程失败: " + e.getMessage() + "\u001b[0m\r\n"));
-            session.close(new CloseStatus(1011, "Failed to start process"));
+            log.error("Failed to start pty terminal process: command={}", command, e);
+            session.sendMessage(new TextMessage("\u001b[31m[错误] 启动伪终端进程失败: " + e.getMessage() + "\u001b[0m\r\n"));
+            session.close(new CloseStatus(1011, "Failed to start pty process"));
             return;
         }
 
@@ -209,25 +218,14 @@ public class TerminalWebSocketHandler extends TextWebSocketHandler {
         InputStream processOut = process.getInputStream();
         final Charset finalCharset = charset;
 
-        // 异步流泵送线程
+        // 异步流读取泵送线程
         Thread readerThread = new Thread(() -> {
             byte[] buffer = new byte[4096];
-            // 标记是否仍在启动阶段（仅在启动阶段过滤已知警告）
-            boolean startupPhase = true;
-            int readCount = 0;
             try {
                 int len;
                 while ((len = processOut.read(buffer)) != -1) {
                     if (session.isOpen()) {
                         String text = new String(buffer, 0, len, finalCharset);
-                        // 启动阶段过滤 setsid 导致的已知 bash 警告
-                        if (startupPhase) {
-                            text = text.replace("bash: cannot set terminal process group (-1): Inappropriate ioctl for device\n", "");
-                            text = text.replace("bash: no job control in this shell\n", "");
-                            if (++readCount > 5) {
-                                startupPhase = false;
-                            }
-                        }
                         if (!text.isEmpty()) {
                             synchronized (session) {
                                 if (session.isOpen()) {
@@ -238,9 +236,9 @@ public class TerminalWebSocketHandler extends TextWebSocketHandler {
                     }
                 }
             } catch (IOException ignored) {
-                // 正常退出或流关闭
+                // 正常进程关闭或流结束
             } catch (Exception e) {
-                log.warn("Error reading terminal output: {}", e.getMessage());
+                log.warn("Error reading pty terminal output: {}", e.getMessage());
             } finally {
                 if (session.isOpen()) {
                     try {
@@ -259,16 +257,16 @@ public class TerminalWebSocketHandler extends TextWebSocketHandler {
 
         sessions.put(session.getId(), new TerminalProcessContext(process, processIn, charset, readerThread));
 
-        // 必须先发送欢迎信息，再启动 reader 线程
-        // 否则 reader 线程和主线程会同时写 WebSocket 导致 TEXT_PARTIAL_WRITING 异常
-        String welcome = String.format("\u001b[36m=== 自动化运维平台 Web 终端已连接 ===\u001b[0m\r\n" +
+        // 发送终端连接成功横幅
+        String welcome = String.format("\u001b[36m=== 自动化运维平台 Web 终端已连接 (PTY Native) ===\u001b[0m\r\n" +
                         "\u001b[90m系统环境: %s | 终端核心: %s | 工作目录: %s | 字符编码: %s\u001b[0m\r\n\r\n",
                 OSUtil.getOS(), shellName, workDir.getAbsolutePath(), charset.name());
         session.sendMessage(new TextMessage(welcome));
 
-        // 欢迎信息发送完毕后再启动 reader 线程，保证不会并发写 WebSocket
         readerThread.start();
     }
+
+    public static final String CTRL_PREFIX = "__CTRL__:";
 
     @Override
     protected void handleTextMessage(@NonNull WebSocketSession session, @NonNull TextMessage message) throws Exception {
@@ -278,33 +276,50 @@ public class TerminalWebSocketHandler extends TextWebSocketHandler {
         }
 
         String payload = message.getPayload();
-        // 如果客户端发送控制帧（如以 JSON 开头）
-        if (payload.startsWith("{") && payload.endsWith("}")) {
-            // 可扩展 resize, ping 等指令
-            if (payload.contains("\"type\":\"ping\"")) {
-                synchronized (session) {
-                    if (session.isOpen()) {
-                        session.sendMessage(new TextMessage("{\"type\":\"pong\"}"));
-                    }
-                }
+        if (StrUtil.isBlank(payload)) {
+            return;
+        }
+
+        String trimmed = payload.trim();
+
+        // 1. 兼容前缀控制帧（若前端使用带前缀的控制包）
+        if (trimmed.startsWith(CTRL_PREFIX)) {
+            String json = trimmed.substring(CTRL_PREFIX.length()).trim();
+            handleControlFrame(session, ctx, json);
+            return;
+        }
+
+        // 2. 识别标准纯 JSON 控制帧（{"type":"resize", ...} 或 {"type":"ping"}）
+        if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+            if (trimmed.contains("\"type\":\"ping\"") || trimmed.contains("\"type\":\"resize\"")) {
+                handleControlFrame(session, ctx, trimmed);
                 return;
-            }
-            if (payload.contains("\"type\":\"input\"")) {
-                // 解析 input 字段
-                int dataIdx = payload.indexOf("\"data\":");
-                if (dataIdx != -1) {
-                    // 若有封装直接透传
-                }
             }
         }
 
-        // 直接向进程写入输入字符
+        // 3. 原生按键输入透传至 PTY
         byte[] bytes = payload.getBytes(ctx.getCharset());
         try {
             ctx.getOutputStream().write(bytes);
             ctx.getOutputStream().flush();
         } catch (IOException e) {
-            log.warn("Failed to write to terminal stdin: {}", e.getMessage());
+            log.warn("Failed to write to pty stdin: {}", e.getMessage());
+        }
+    }
+
+    private void handleControlFrame(WebSocketSession session, TerminalProcessContext ctx, String json) throws IOException {
+        if (json.contains("\"type\":\"ping\"")) {
+            synchronized (session) {
+                if (session.isOpen()) {
+                    session.sendMessage(new TextMessage("{\"type\":\"pong\"}"));
+                }
+            }
+            return;
+        }
+        if (json.contains("\"type\":\"resize\"")) {
+            int cols = extractJsonInt(json, "cols", 80);
+            int rows = extractJsonInt(json, "rows", 24);
+            ctx.resize(cols, rows);
         }
     }
 
@@ -344,5 +359,29 @@ public class TerminalWebSocketHandler extends TextWebSocketHandler {
             }
         }
         return params;
+    }
+
+    private int parsePositiveInt(String val, int defaultVal) {
+        if (StrUtil.isBlank(val)) {
+            return defaultVal;
+        }
+        try {
+            int parsed = Integer.parseInt(val.trim());
+            return parsed > 0 ? parsed : defaultVal;
+        } catch (Exception e) {
+            return defaultVal;
+        }
+    }
+
+    private int extractJsonInt(String json, String field, int defaultVal) {
+        try {
+            Pattern pattern = Pattern.compile("\"" + field + "\"\\s*:\\s*(\\d+)");
+            Matcher matcher = pattern.matcher(json);
+            if (matcher.find()) {
+                return Integer.parseInt(matcher.group(1));
+            }
+        } catch (Exception ignored) {
+        }
+        return defaultVal;
     }
 }

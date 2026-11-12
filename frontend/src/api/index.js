@@ -41,8 +41,6 @@ api.interceptors.response.use(response => {
 export default {
   baseURL: api.defaults.baseURL,
   auth: {
-    status: () => api.get('auth/status'),
-    init: (data) => api.post('auth/init', data),
     login: (data) => api.post('auth/login', data),
     logout: () => api.post('auth/logout'),
     updatePassword: (data) => api.put('auth/password', data)

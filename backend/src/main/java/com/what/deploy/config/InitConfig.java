@@ -4,20 +4,13 @@ import cn.hutool.core.io.FileUtil;
 import jakarta.annotation.PostConstruct;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.beans.factory.annotation.Autowired;
 
 import java.io.File;
 
 @Configuration
 @Slf4j
 public class InitConfig {
-
-    public static volatile boolean initialized = false;
-
-    @Autowired
-    private JdbcTemplate jdbcTemplate;
 
     @Value("${spring.datasource.url}")
     private String dbUrl;
@@ -48,25 +41,8 @@ public class InitConfig {
                 FileUtil.mkdir(dir);
             }
         }
-        
-        // 3. 检查初始化状态
-        try {
-            Integer count = jdbcTemplate.queryForObject("SELECT count(*) FROM sys_user", Integer.class);
-            initialized = count != null && count > 0;
-            log.info("System initialization status: {}", initialized);
-            
-            // 4. 类型规范化补丁 (Normalization Patch)
-            log.info("Applying Resource Type Normalization patch...");
-            int updated = jdbcTemplate.update("UPDATE sys_resource SET type = 'COMMON' WHERE type = 'FILE'");
-            if (updated > 0) {
-                log.info("Migrated {} resource entries from 'FILE' to 'COMMON'", updated);
-            }
-        } catch (Exception e) {
-            log.warn("Failed to check sys_user table (might not exist yet) or apply patches: {}", e.getMessage());
-            initialized = false;
-        }
 
-        log.info("Initialization complete.");
+        log.info("System directories initialization complete.");
     }
 }
 

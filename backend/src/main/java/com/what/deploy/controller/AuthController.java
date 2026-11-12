@@ -4,9 +4,7 @@ import cn.dev33.satoken.stp.StpUtil;
 import cn.dev33.satoken.util.SaResult;
 import cn.hutool.crypto.digest.BCrypt;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
-import com.what.deploy.entity.SystemResource;
 import com.what.deploy.entity.User;
-import com.what.deploy.mapper.SystemResourceMapper;
 import com.what.deploy.mapper.UserMapper;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.*;
@@ -17,60 +15,6 @@ public class AuthController {
 
     @Autowired
     private UserMapper userMapper;
-
-    @Autowired
-    private SystemResourceMapper systemResourceMapper;
-
-    @GetMapping("/status")
-    public SaResult getStatus() {
-        Long count = userMapper.selectCount(null);
-        return SaResult.data(count > 0);
-    }
-
-    @PostMapping("/init")
-    public SaResult init(@RequestBody User user) {
-        Long count = userMapper.selectCount(null);
-        if (count > 0) {
-            return SaResult.error("系统已初始化，禁止重复操作");
-        }
-        user.setNickname("Administrator");
-        user.setCreateTime(new java.util.Date());
-        // 密码加密存储
-        user.setPassword(BCrypt.hashpw(user.getPassword()));
-        userMapper.insert(user);
-
-        // 初始化预置资源
-        insertDefaultResources();
-
-        com.what.deploy.config.InitConfig.initialized = true;
-        return SaResult.ok("初始化成功，请登录");
-    }
-
-    private void insertDefaultResources() {
-        SystemResource r1 = new SystemResource();
-        r1.setPath("/data/criminal/jeeplus-vue.jar");
-        r1.setType("JAR");
-        r1.setCategory("APP");
-        r1.setIsUsed(0);
-        r1.setRemark("刑侦后端");
-        systemResourceMapper.insert(r1);
-
-        SystemResource r2 = new SystemResource();
-        r2.setPath("/data/criminal/application.yml");
-        r2.setType("FILE");
-        r2.setCategory("CONFIG");
-        r2.setIsUsed(0);
-        r2.setRemark("刑侦后端配置");
-        systemResourceMapper.insert(r2);
-
-        SystemResource r3 = new SystemResource();
-        r3.setPath("/usr/share/nginx/html/criminal");
-        r3.setType("VUE");
-        r3.setCategory("APP");
-        r3.setIsUsed(0);
-        r3.setRemark("刑侦前端");
-        systemResourceMapper.insert(r3);
-    }
 
     @PostMapping("/login")
     public SaResult login(@RequestBody User user) {
